@@ -223,10 +223,36 @@ function rowHtml(r) {
   </tr>`;
 }
 
+// Every row is reachable — but they are not all in the DOM at once.
+//
+// The matrix is 4,165 rows by up to 14 datacenter columns. Rendering all of it
+// is 58,000 cells and ~129,000 nodes, which cost 635 ms per sort and made the
+// column headers feel broken. Rows are appended as you scroll instead, so the
+// old 600-row cap stays gone without paying for a DOM nobody is looking at.
+const WINDOW = 250;
+let lastRows = [];
+let shown = 0;
+
+function appendRows(n) {
+  const slice = lastRows.slice(shown, shown + n);
+  if (!slice.length) return;
+  $('#rows').insertAdjacentHTML('beforeend', slice.map(rowHtml).join(''));
+  shown += slice.length;
+}
+
+function onGridScroll() {
+  const el = $('.tscroll');
+  if (shown >= lastRows.length) return;
+  if (el.scrollTop + el.clientHeight > el.scrollHeight - 600) appendRows(WINDOW);
+}
+
 function render() {
   const { rows, cols, orderable, starred } = buildRows();
   renderHead(cols);
-  $('#rows').innerHTML = rows.map(rowHtml).join('');
+  lastRows = rows;
+  shown = 0;
+  $('#rows').innerHTML = '';
+  appendRows(WINDOW);
 
   if (!rows.length) {
     $('#empty').innerHTML = `<div class="state">
@@ -722,6 +748,8 @@ function wire() {
   $('#modal').onclick = (e) => { if (e.target.id === 'modal') closeModal(); };
   $('#watch-form').onsubmit = submitWatch;
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+  $('.tscroll').addEventListener('scroll', onGridScroll, { passive: true });
 
   setInterval(renderStatus, 1000);
   window.addEventListener('resize', measureChrome);

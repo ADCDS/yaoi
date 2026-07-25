@@ -480,4 +480,17 @@ table.matrix { width: 100%; border-collapse: collapse; }
   .two { grid-template-columns: 1fr; }
   .rail { gap: 10px; }
   .rail .stat.hide-sm { display: none; }
+
+  /* On a phone the summary chrome above the grid was tall enough to push every
+     row below the fold. Keep the readings, drop their explanatory second lines
+     and trim the padding so the data starts on the first screen. */
+  .ladder { padding: 12px 12px 10px; }
+  .ladder-top { margin-bottom: 9px; }
+  .rung .s { display: none; }
+  .rungs { grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 7px; }
+  .watches { padding: 10px; gap: 9px; }
+  .watch { padding: 10px 11px; gap: 8px; }
+  .peek .row:nth-of-type(n + 3) { display: none; }
+  .filters { padding: 8px 10px; }
+  .tscroll { max-height: 78vh; }
 }
