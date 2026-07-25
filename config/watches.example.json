@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Canada NVMe, in stock",
+    "countries": ["CA"],
+    "storageKinds": ["NVMe"],
+    "inStockOnly": true,
+    "cooldownMinutes": 30,
+    "channels": ["telegram"]
+  },
+  {
+    "name": "Any Kimsufi under 64 GB, including next-day builds",
+    "ranges": ["kimsufi"],
+    "inStockOnly": false,
+    "quietFrom": "23:00",
+    "quietTo": "07:00",
+    "channels": ["ntfy", "email"]
+  },
+  {
+    "name": "One exact model, anywhere",
+    "planCodes": ["24sys022"],
+    "channels": ["telegram"]
+  }
+]

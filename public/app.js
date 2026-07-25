@@ -1,146 +1,556 @@
-/* Kimsufi Watch — client */
-'use strict';
+// public/app.js — Kimsufi Watch client.
+//
+// The structural idea: ONE ROW PER CONFIGURATION, datacenters as columns.
+//
+// The previous build exploded every configuration into one row per datacenter,
+// turning 16,689 configurations into tens of thousands of rows — then capped the
+// table at 600, so most were unreachable. It also meant the comparison this tool
+// exists to make ("in stock in Beauharnois, a day out in Frankfurt") was split
+// across rows you could not see at once. As a matrix, the eco set is 4,165 rows,
+// no cap is needed, and that comparison is one glance.
+//
+// Availability logic is imported, never reimplemented. This file used to carry
+// its own copies of availMeta() and configMatches(); they drifted silently.
 
-const $ = (s, el = document) => el.querySelector(s);
-const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+import { availMeta, tierOf, TIERS, isEco, STORAGE_KINDS } from './core/ovh.js';
+import { cellMatches, criteriaSummary, CHANNELS } from './core/watches.js';
+import { orderLink, apiUrl } from './core/deeplink.js';
+import * as T from './transport.js';
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const TIER_META = Object.fromEntries(TIERS.map((t) => [t.key, t]));
+const CELL_TEXT = { now: '1h', h24: '24', h72: '72', long: '··', soon: '~', none: '', notSold: '' };
+const CHANNEL_LABEL = { browser: 'Browser', telegram: 'Telegram', ntfy: 'ntfy', webhook: 'Discord', email: 'Email' };
+const CHANNEL_GLYPH = { browser: 'br', telegram: 'tg', ntfy: 'nt', webhook: 'ds', email: '@' };
 
 const state = {
-  configs: [],
-  byFqn: new Map(),
-  meta: {},
-  static: { datacenters: {}, countries: {}, ranges: {} },
-  targets: [],
+  meta: {}, dcs: [], ranges: {}, configs: [], byFqn: new Map(),
+  watches: [], events: [], channels: [], connected: false,
 };
 
+const prefs = T.loadPrefs();
 const filters = {
-  search: '',
-  countries: new Set(['CA']),
-  dcs: new Set(),
-  ranges: new Set(),
-  kinds: new Set(),
-  ram: 0,
-  avail: 'orderable',
+  search: prefs.search || '',
+  countries: new Set(prefs.countries || []),
+  kinds: new Set(prefs.kinds || []),
+  ranges: new Set(prefs.ranges || []),
+  tiers: new Set(prefs.tiers || []),
+  nonEco: !!prefs.nonEco,
 };
+let sort = prefs.sort || { key: 'avail', dir: 1 };
+let muted = !!prefs.muted;
+let theme = prefs.theme || 'auto';
+let showHistory = prefs.showHistory !== false;
+let showChannels = prefs.showChannels !== false;
 
-const KINDS = ['NVMe', 'SSD', 'SAS', 'SATA'];
-const CAP = 600;
-let sort = { key: 'avail', dir: 1 };
-let muted = false;
-const flashing = new Set(); // fqn recently changed
-const notifiedRecently = new Map(); // `${fqn}|${dc}` -> ts
-let es = null;
-
-// --------------------------------------------------------------------------
-// availability interpretation (mirrors server lib/ovh.js)
-// --------------------------------------------------------------------------
-function AV(value) {
-  const v = String(value || '').trim();
-  if (!v || v === 'unavailable') return { state: 'unavailable', orderable: false, inStock: false, rank: Infinity, label: 'Unavailable' };
-  if (v === 'unknown') return { state: 'unknown', orderable: false, inStock: false, rank: 90000, label: 'Unknown' };
-  if (v === 'comingSoon') return { state: 'comingSoon', orderable: false, inStock: false, rank: 80000, label: 'Coming soon' };
-  const m = /^(\d+)H(?:-(low|high))?$/.exec(v);
-  if (m) {
-    const hours = Number(m[1]);
-    const level = m[2];
-    const inStock = hours <= 1;
-    const rank = hours - (level === 'high' ? 0.5 : level === 'low' ? 0 : 0.25);
-    let label;
-    if (inStock) label = level ? `In stock (${level})` : 'In stock';
-    else if (hours < 48) label = `~${hours}h`;
-    else label = `~${Math.round(hours / 24)}d`;
-    return { state: inStock ? 'inStock' : 'delayed', orderable: true, inStock, rank, label };
-  }
-  return { state: 'other', orderable: true, inStock: false, rank: 70000, label: v };
+function persist() {
+  T.savePrefs({
+    search: filters.search,
+    countries: [...filters.countries], kinds: [...filters.kinds],
+    ranges: [...filters.ranges], tiers: [...filters.tiers],
+    nonEco: filters.nonEco, sort, muted, theme, showHistory, showChannels,
+  });
 }
 
-const fmtAgo = (ts) => {
+// ===========================================================================
+// Rows: one per configuration
+// ===========================================================================
+function visibleDcs() {
+  if (!filters.countries.size) return state.dcs;
+  return state.dcs.filter((d) => filters.countries.has(d.country));
+}
+
+function buildRows() {
+  const cols = visibleDcs();
+  const colCodes = cols.map((d) => d.code);
+  const q = filters.search.toLowerCase();
+  const rows = [];
+  let orderable = 0;
+  let starred = 0;
+
+  for (const c of state.configs) {
+    if (!filters.nonEco && !isEco(c.range)) continue;
+    if (filters.ranges.size && !filters.ranges.has(c.range)) continue;
+    if (filters.kinds.size && !c.storageKinds.some((k) => filters.kinds.has(k))) continue;
+    if (q) {
+      const hay = `${c.fqn} ${c.name} ${c.memoryLabel} ${c.storageLabel} ${c.rangeLabel} ${c.planCode}`.toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+
+    // One cell per visible datacenter column. A datacenter missing from this
+    // configuration's map is "not sold here" — a different fact from
+    // out-of-stock, which the old row-per-datacenter table could not express.
+    const cells = [];
+    let best = Infinity;
+    let anyTier = false;
+    let rowStarred = false;
+
+    for (const code of colCodes) {
+      const has = Object.prototype.hasOwnProperty.call(c.dc, code);
+      const avail = has ? c.dc[code] : undefined;
+      const tier = has ? tierOf(avail) : 'notSold';
+      const am = availMeta(avail);
+      if (am.rank < best) best = am.rank;
+
+      let match = false;
+      for (const w of state.watches) {
+        if (!w.enabled || !w.rule) continue;
+        if (cellMatches(c, code, avail, { ...w.rule, ...normRule(w.rule) })) { match = true; break; }
+      }
+      if (match) { rowStarred = true; starred++; }
+      if (filters.tiers.size && filters.tiers.has(tier)) anyTier = true;
+      cells.push({ code, tier, avail, label: am.label, match });
+    }
+
+    if (filters.tiers.size && !anyTier) continue;
+    if (cells.every((x) => x.tier === 'notSold')) continue;
+
+    if (Object.values(c.dc).some((v) => availMeta(v).orderable)) orderable++;
+    // How many of the visible datacenters can actually sell this. Used to break
+    // ties on the availability sort, so a configuration you can get in six places
+    // outranks one locked to a single region — which is the question the matrix
+    // exists to answer.
+    const reach = cells.filter((x) => x.tier === 'now' || x.tier === 'h24' || x.tier === 'h72' || x.tier === 'long').length;
+    rows.push({ c, cells, best, reach, starred: rowStarred });
+  }
+
+  sortRows(rows);
+  return { rows, cols, orderable, starred };
+}
+
+// Watch summaries carry a plain `rule`; cellMatches expects the full watch shape.
+function normRule(rule) {
+  return {
+    countries: rule.countries || [], datacenters: rule.datacenters || [],
+    ranges: rule.ranges || [], storageKinds: rule.storageKinds || [],
+    storageContains: rule.storageContains || '', planCodes: rule.planCodes || [],
+    search: rule.search || '', minRamGB: rule.minRamGB || null,
+    inStockOnly: !!rule.inStockOnly, includeComingSoon: !!rule.includeComingSoon,
+  };
+}
+
+function sortRows(rows) {
+  const get = {
+    range: (r) => r.c.rangeLabel,
+    name: (r) => r.c.model || r.c.name,
+    ram: (r) => r.c.ramGB || 0,
+    storage: (r) => r.c.storageLabel,
+    price: (r) => r.c.price,
+    avail: (r) => r.best,
+  }[sort.key] || ((r) => r.best);
+  rows.sort((a, b) => {
+    const va = get(a), vb = get(b);
+    const an = va == null || va === Infinity, bn = vb == null || vb === Infinity;
+    if (an && bn) return b.reach - a.reach;
+    if (an) return 1;          // rows with nothing to offer sink, either direction
+    if (bn) return -1;
+    let d = typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb));
+    if (d === 0) d = a.best - b.best;
+    // Widest availability first among equals: a machine you can get in six
+    // datacenters is more useful than one locked to a single region.
+    if (d === 0) return b.reach - a.reach;
+    return d * sort.dir;
+  });
+}
+
+// ===========================================================================
+// Render: the matrix
+// ===========================================================================
+const COLUMNS = [
+  { key: 'range', label: 'Range' },
+  { key: 'name', label: 'Server' },
+  { key: 'ram', label: 'RAM' },
+  { key: 'storage', label: 'Storage' },
+  { key: 'price', label: 'Price', cls: 'r' },
+];
+
+function renderHead(cols) {
+  const arrow = (k) => (sort.key === k ? `<span class="arrow">${sort.dir === 1 ? '▲' : '▼'}</span>` : '');
+  const cells = COLUMNS.map((c) =>
+    `<th class="sortable ${c.cls || ''}" data-sort="${c.key}">${c.label} ${arrow(c.key)}</th>`);
+  const heads = cols.map((d) =>
+    `<span title="${esc(d.city)}, ${esc(d.countryName)} — ${esc(d.code)}">${esc(d.short || d.code)}<i>${esc(d.country)}</i></span>`).join('');
+  cells.push(`<th class="sortable" data-sort="avail">Availability ${arrow('avail')}<div class="dcgrid dchead">${heads}</div></th>`);
+  cells.push('<th></th>');
+  $('#head-row').innerHTML = cells.join('');
+  $('#head-row').querySelectorAll('th[data-sort]').forEach((th) => {
+    th.onclick = () => {
+      const k = th.dataset.sort;
+      sort = { key: k, dir: sort.key === k ? -sort.dir : 1 };
+      persist(); render();
+    };
+  });
+}
+
+function priceCell(c) {
+  if (c.priceText) return `<b>${esc(c.priceText)}</b><span class="per">/mo</span>`;
+  // Two different reasons for having no price, and the difference matters:
+  // non-eco ranges have no public catalogue at all, whereas an eco configuration
+  // missing from the catalogue is a gap in OVH's own data.
+  if (!isEco(c.range)) {
+    return `<span class="none" title="Scale, High Grade, HCI and SDS are not in OVH's public eco catalogue, so there is no price to read.">no public price</span>`;
+  }
+  return `<span class="none" title="This configuration is not listed in the eco order catalogue, so OVH publishes no price for it.">not priced</span>`;
+}
+
+function rowHtml(r) {
+  const c = r.c;
+  const cells = r.cells.map((x) => {
+    const tm = TIER_META[x.tier];
+    const title = x.tier === 'notSold'
+      ? `${x.code} — not sold here`
+      : `${x.code} — ${x.label}`;
+    return `<span class="cell t-${x.tier}${x.match ? ' match' : ''}" title="${esc(title)}">${CELL_TEXT[x.tier] || ''}</span>`;
+  }).join('');
+
+  const link = orderLink(c, T.subsidiary);
+  const actions = [];
+  if (link) {
+    actions.push(`<a class="linkbtn go" href="${esc(link.url)}" target="_blank" rel="noopener" title="${link.kind === 'model' ? 'OVH order page for this exact model' : 'OVH listing for this range'}">${link.label} ↗</a>`);
+  }
+  actions.push(`<a class="linkbtn" href="${esc(apiUrl(c))}" target="_blank" rel="noopener" title="Verify against the OVH API">API ↗</a>`);
+
+  return `<tr class="${r.starred ? 'starred' : ''}">
+    <td class="rangecell r-${esc(c.range)}">${esc(c.rangeLabel)}</td>
+    <td><div class="model">${esc(c.model || c.name)}</div>${c.cpu ? `<div class="cpu">${esc(c.cpu)}</div>` : ''}<div class="pcode">${esc(c.planCode)}</div></td>
+    <td class="spec"><b>${c.ramGB || '—'}</b>${c.ramGB ? ' GB' : ''}</td>
+    <td class="spec">${esc(c.storageLabel)}</td>
+    <td class="price">${priceCell(c)}</td>
+    <td><div class="dcgrid">${cells}</div></td>
+    <td><div class="rowact">${actions.join('')}</div></td>
+  </tr>`;
+}
+
+function render() {
+  const { rows, cols, orderable, starred } = buildRows();
+  renderHead(cols);
+  $('#rows').innerHTML = rows.map(rowHtml).join('');
+
+  if (!rows.length) {
+    $('#empty').innerHTML = `<div class="state">
+      <h3>Nothing matches</h3>
+      <p>No configuration fits these filters right now. Widen the country, allow longer delivery times, or clear the filters.</p>
+      <button class="btn small fix" id="e-clear">Clear filters</button>
+    </div>`;
+    const b = $('#e-clear'); if (b) b.onclick = resetFilters;
+  } else {
+    $('#empty').innerHTML = '';
+  }
+
+  const legend = ['now', 'h24', 'h72', 'long', 'soon', 'none']
+    .filter((k) => k !== 'long' || rows.some((r) => r.cells.some((c) => c.tier === 'long')))
+    .map((k) => `<span><i style="background:var(--t-${k})"></i>${esc(TIER_META[k].label)}</span>`).join('');
+  $('#tfoot').innerHTML =
+    `<span><b>${rows.length.toLocaleString()}</b> configurations · <b>${orderable.toLocaleString()}</b> orderable`
+    + (starred ? ` · <span style="color:var(--act)">${starred} cell${starred > 1 ? 's' : ''} match a watch</span>` : '')
+    + `</span><div class="legend">${legend}`
+    + `<span><i style="background:transparent;box-shadow:inset 0 0 0 1px var(--rule-2)"></i>not sold</span></div>`;
+
+  renderLadder();
+  renderStatus();
+}
+
+// ===========================================================================
+// Render: the delivery ladder
+// ===========================================================================
+function renderLadder() {
+  const counts = filters.nonEco ? (state.meta.tiersAll || {}) : (state.meta.tiers || {});
+  // Only rungs the data actually has. Nothing sits at 240H+ in the eco set right
+  // now, and a fixed ladder would render dead rungs.
+  const present = TIERS.filter((t) => t.key !== 'notSold' && (counts[t.key] || 0) > 0);
+  if (!present.length) { $('#ladder').hidden = true; return; }
+  $('#ladder').hidden = false;
+
+  const total = present.reduce((s, t) => s + counts[t.key], 0);
+  $('#ladder-title').textContent = filters.nonEco ? 'Delivery ladder — all ranges' : 'Delivery ladder — eco';
+  $('#ladder-hint').textContent =
+    `${total.toLocaleString()} configuration × datacenter pairs · click a rung to filter`;
+
+  $('#ladder-bar').innerHTML = present.map((t) =>
+    `<button style="flex:${counts[t.key]} 1 0;background:var(--t-${t.key})" data-tier="${t.key}"
+      aria-pressed="${filters.tiers.has(t.key)}"
+      title="${esc(t.label)} — ${counts[t.key].toLocaleString()}"
+      aria-label="${esc(t.label)}, ${counts[t.key]} pairs"></button>`).join('');
+
+  $('#ladder-rungs').innerHTML = present.map((t) =>
+    `<button class="rung" data-tier="${t.key}" aria-pressed="${filters.tiers.has(t.key)}">
+      <span class="stripe" style="background:var(--t-${t.key})"></span>
+      <span><span class="v">${counts[t.key].toLocaleString()}</span><span class="k">${esc(t.label)}</span><span class="s">${esc(t.sub)}</span></span>
+    </button>`).join('');
+
+  document.querySelectorAll('[data-tier]').forEach((el) => {
+    el.onclick = () => {
+      const k = el.dataset.tier;
+      filters.tiers.has(k) ? filters.tiers.delete(k) : filters.tiers.add(k);
+      persist(); render();
+    };
+  });
+}
+
+// ===========================================================================
+// Render: status rail
+// ===========================================================================
+function fmtAgo(ts) {
   if (!ts) return '—';
   const s = Math.round((Date.now() - ts) / 1000);
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
-};
-
-// --------------------------------------------------------------------------
-// data load + live stream
-// --------------------------------------------------------------------------
-async function loadState() {
-  const r = await fetch('/api/state');
-  const data = await r.json();
-  state.meta = data.meta;
-  state.static = data.static;
-  state.configs = data.configs;
-  state.byFqn = new Map(data.configs.map((c) => [c.fqn, c]));
-  state.targets = data.targets;
-  buildFilterChips();
-  renderTargets();
-  render();
-  renderStatus();
 }
 
-function connectStream() {
-  if (es) es.close();
-  es = new EventSource('/api/stream');
-  es.addEventListener('hello', (e) => {
-    state.meta = JSON.parse(e.data).meta;
-    renderStatus();
-  });
-  es.addEventListener('update', (e) => onUpdate(JSON.parse(e.data)));
-  es.onopen = () => { state._sse = true; renderStatus(); };
-  es.onerror = () => { state._sse = false; renderStatus(); };
-}
+function renderStatus() {
+  const m = state.meta || {};
+  const led = $('#led');
+  led.className = `led ${m.error ? 'bad' : state.connected ? 'live' : ''}`;
+  led.title = m.error ? 'The last check failed' : state.connected ? 'Connected' : 'Not connected';
 
-function onUpdate(msg) {
-  state.meta = msg.meta || state.meta;
-  if (msg.targets) state.targets = msg.targets;
+  $('#s-checked').innerHTML = m.error
+    ? `<span class="bad">check failed</span> · showing data from <b>${fmtAgo(m.lastOk || m.at)}</b>`
+    : `checked <b>${fmtAgo(m.lastOk || m.at)}</b>`;
 
-  if (msg.refetch) { loadState(); return; }
-
-  if (Array.isArray(msg.changes) && msg.changes.length) {
-    for (const c of msg.changes) {
-      state.byFqn.set(c.fqn, c);
-      flashing.add(c.fqn);
-    }
-    state.configs = [...state.byFqn.values()];
-    setTimeout(() => { msg.changes.forEach((c) => flashing.delete(c.fqn)); render(); }, 2600);
+  const cad = m.cadence || {};
+  if (cad.kind === 'live' && m.lastPoll) {
+    const next = Math.max(0, Math.round((m.lastPoll + cad.everySeconds * 1000 - Date.now()) / 1000));
+    $('#s-next').innerHTML = `next in <b>${next}s</b>`;
+  } else if (cad.kind === 'scheduled') {
+    // Honest about what a scheduled job is. Implying a live feed would be worse
+    // than admitting the floor: a monitor that silently isn't monitoring is
+    // worse than no monitor.
+    $('#s-next').innerHTML = `refreshed every <b>~${cad.everyMinutes}m</b>`;
+    $('#s-next').className = 'stat hide-sm warn';
+    $('#s-next').title = cad.note || '';
+  } else {
+    $('#s-next').textContent = '';
   }
 
-  if (Array.isArray(msg.alerts) && msg.alerts.length) handleAlerts(msg.alerts);
+  const counts = m.counts || {};
+  $('#s-count').innerHTML = `<b>${(filters.nonEco ? counts.all : counts.eco || counts.all || 0).toLocaleString()}</b> configurations`;
+  $('#s-cadence').innerHTML = m.catalog?.ok
+    ? `names <b>${m.catalog.count}/${esc(m.subsidiary || '')}</b>`
+    : `<span title="${esc(m.catalog?.error || 'catalogue not loaded')}">derived names</span>`;
 
-  renderTargets();
-  render();
-  renderStatus();
+  const on = state.channels.filter((c) => c.configured && c.channel !== 'browser').map((c) => CHANNEL_LABEL[c.channel]);
+  $('#s-channels').innerHTML = on.length
+    ? `${on.join(' · ')} armed`
+    : (T.isStatic ? 'browser alerts only' : '');
 }
 
-// --------------------------------------------------------------------------
-// alerts: toast + OS notification + sound
-// --------------------------------------------------------------------------
+// ===========================================================================
+// Render: watch cards
+// ===========================================================================
+function renderWatches() {
+  const el = $('#watches');
+  if (!state.watches.length) {
+    el.innerHTML = `<div class="state" style="grid-column:1/-1">
+      <h3>No watches yet</h3>
+      <p>A watch describes the server you want and tells you the moment it appears. Start with a country and a disk type.</p>
+      <button class="btn primary fix" id="w-first">Create your first watch</button>
+    </div>`;
+    $('#w-first').onclick = () => openModal(null);
+    return;
+  }
+
+  el.innerHTML = state.watches.map((w) => {
+    const hot = w.inStockCount > 0;
+    const chans = CHANNELS.map((c) => {
+      const on = (w.channels || []).includes(c);
+      return `<span class="chip-ch ${on ? 'on' : ''}" title="${esc(CHANNEL_LABEL[c])}${on ? '' : ' — off for this watch'}">${esc(CHANNEL_GLYPH[c])}</span>`;
+    }).join('');
+    const peek = (w.sample || []).slice(0, 3).map((m) =>
+      `<div class="row"><i style="background:var(--t-${m.tier || tierOf(m.availability)})"></i><b>${esc(m.model || m.name)}</b><span>${esc((m.storageLabel || '').split(' + ')[0])}</span><span>${esc(m.dc)}</span></div>`).join('');
+    const more = w.matchCount > 3 ? `<span class="more">+ ${(w.matchCount - 3).toLocaleString()} more</span>` : '';
+    // A watch can legitimately match rows the table is currently hiding — the
+    // count would otherwise look like it disagrees with the grid.
+    const hidden = !filters.nonEco && w.ecoMatchCount != null && w.matchCount > w.ecoMatchCount
+      ? `<span class="more" title="Turn on “Show non-eco ranges” to see these in the table">${(w.matchCount - w.ecoMatchCount).toLocaleString()} of these are non-eco and hidden below</span>`
+      : '';
+    return `<div class="watch ${hot ? 'hit' : ''} ${w.enabled ? '' : 'off'}">
+      <div class="watch-head">
+        <h3>${esc(w.name)}</h3>
+        <button class="iconbtn" data-act="toggle" data-id="${esc(w.id)}" title="${w.enabled ? 'Pause this watch' : 'Resume this watch'}">${w.enabled ? '⏸' : '▶'}</button>
+        <button class="iconbtn" data-act="edit" data-id="${esc(w.id)}" title="Edit this watch">✎</button>
+        <button class="iconbtn" data-act="delete" data-id="${esc(w.id)}" title="Delete this watch">🗑</button>
+      </div>
+      <div class="crit">${esc(w.criteria)}</div>
+      <div class="counts">
+        <div class="fig"><span class="v ${w.matchCount ? '' : 'zero'}">${w.matchCount.toLocaleString()}</span><span class="k lab">matches</span></div>
+        <div class="fig"><span class="v ${hot ? 'hot' : 'zero'}">${w.inStockCount.toLocaleString()}</span><span class="k lab">in stock</span></div>
+        <div class="chans">${chans}</div>
+      </div>
+      <div class="peek">${w.enabled ? (peek || '<span class="more">nothing matches right now</span>') : '<span class="more">paused — not being checked</span>'} ${more} ${hidden}</div>
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('[data-act]').forEach((b) => {
+    const w = state.watches.find((x) => x.id === b.dataset.id);
+    if (!w) return;
+    if (b.dataset.act === 'toggle') b.onclick = () => mutate(() => T.store.update(w.id, { enabled: !w.enabled }));
+    if (b.dataset.act === 'edit') b.onclick = () => openModal(w);
+    if (b.dataset.act === 'delete') b.onclick = () => {
+      if (confirm(`Delete the watch “${w.name}”?`)) mutate(() => T.store.remove(w.id));
+    };
+  });
+}
+
+async function mutate(fn) {
+  try {
+    await fn();
+    await syncWatches();
+  } catch (err) {
+    toast('That did not save', esc(err.message || err), 'bad');
+  }
+}
+
+async function syncWatches() {
+  if (T.isStatic) {
+    const res = T.store.evaluate(state.configs);
+    state.watches = res.summaries;
+  } else {
+    state.watches = await T.store.list();
+  }
+  renderWatches();
+  render();
+}
+
+// ===========================================================================
+// Render: history
+// ===========================================================================
+function fmtDur(ms) {
+  if (ms == null) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function renderHistory() {
+  const panel = $('#history-panel');
+  if (!state.events.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $('#hist-body').hidden = !showHistory;
+  $('#b-hist-toggle').textContent = showHistory ? 'Hide' : 'Show';
+
+  const ups = state.events.filter((e) => e.dir === 'up').length;
+  $('#hist-summary').innerHTML = `<b>${state.events.length.toLocaleString()}</b> events · ${ups.toLocaleString()} came into stock`;
+
+  const rows = state.events.slice(0, 60).map((e) => {
+    const when = new Date(e.t);
+    const time = when.toTimeString().slice(0, 8);
+    const dcName = (state.dcs.find((d) => d.code === e.dc) || {}).city || e.dc;
+    let verb, dur = '';
+    if (e.dir === 'alert') {
+      verb = `alerted <b>${esc(e.watchName || 'a watch')}</b> about <b>${esc(e.model)}</b> in ${esc(dcName)}`;
+      dur = (e.channels || []).join(', ');
+    } else if (e.dir === 'up') {
+      verb = `<b>${esc(e.model)}</b> became available in ${esc(dcName)}`;
+      dur = e.to === 'now' ? 'in stock' : TIER_META[e.to]?.label || e.to;
+    } else {
+      verb = `<b>${esc(e.model)}</b> ${e.to === 'none' ? 'sold out' : `slipped to ${esc(TIER_META[e.to]?.label || e.to)}`} in ${esc(dcName)}`;
+      dur = e.heldMs != null ? `held ${fmtDur(e.heldMs)}` : '';
+    }
+    return `<div class="tl-row">
+      <span class="tl-t">${time}</span>
+      <span class="tl-m ${esc(e.dir)}"></span>
+      <span class="tl-b">${verb} <span class="pc">${esc(e.planCode)}${e.storage ? ` · ${esc(e.storage)}` : ''}</span></span>
+      <span class="tl-d ${e.heldMs != null ? 'held' : ''}">${esc(dur)}</span>
+    </div>`;
+  }).join('');
+  $('#hist-body').innerHTML = rows;
+}
+
+// ===========================================================================
+// Render: notification channels
+// ===========================================================================
+function renderChannels() {
+  $('#chan-body').hidden = !showChannels;
+  $('#chan-note').hidden = !showChannels;
+  $('#b-chan-toggle').textContent = showChannels ? 'Hide' : 'Show';
+
+  const on = state.channels.filter((c) => c.configured).length;
+  $('#chan-summary').innerHTML = `<b>${on}</b> of ${state.channels.length} on`;
+
+  $('#chan-body').innerHTML = state.channels.map((c) => `
+    <div class="chan ${c.configured ? 'ok' : ''}">
+      <span class="glyph">${esc(CHANNEL_GLYPH[c.channel] || '?')}</span>
+      <span>
+        <span class="nm">${esc(CHANNEL_LABEL[c.channel] || c.channel)}</span>
+        <span class="st ${c.configured ? 'good' : ''}" data-st="${esc(c.channel)}">${esc(c.detail || 'Not set up — add its settings to turn this on')}</span>
+      </span>
+      <span>${c.configured ? `<button class="btn quiet small" data-test="${esc(c.channel)}">Send test</button>` : ''}</span>
+    </div>`).join('');
+
+  $('#chan-body').querySelectorAll('[data-test]').forEach((b) => {
+    b.onclick = async () => {
+      const name = b.dataset.test;
+      b.disabled = true; b.textContent = 'Sending…';
+      if (name === 'browser') {
+        notifyBrowser({
+          model: 'SYS-2', city: 'Beauharnois', flag: '🇨🇦', memoryLabel: '128 GB ECC 2666',
+          storageLabel: '2×1.92 TB NVMe', availLabel: 'In stock (high)', planCode: '24sys022',
+          priceText: '$159.87 CAD', watchName: 'Test', range: 'soyoustart', name: 'SYS-2 | Intel Xeon-D 2141I',
+        });
+        beep();
+      }
+      const r = await T.testChannel(name);
+      const st = $(`[data-st="${name}"]`);
+      if (st) {
+        st.textContent = r.ok ? 'Test delivered just now' : `Test failed — ${r.error || 'no reason given'}`;
+        st.className = `st ${r.ok ? 'good' : 'bad'}`;
+      }
+      b.disabled = false; b.textContent = 'Send test';
+    };
+  });
+
+  $('#chan-note').innerHTML = T.isStatic
+    ? `<b>This page alerts you only while a tab is open.</b> It is a published snapshot on static
+       hosting, so there is no server here to push to your phone — and no account, which is also why
+       your watches stay in this browser and are visible to nobody else.
+       For alerts that reach you with the tab closed, run your own copy: fork the repository, add
+       your Telegram, ntfy, Discord or email settings as repository secrets, and enable the scheduled
+       job. See <code>docs/deploy-your-own.md</code>.`
+    : `<b>Channels are configured by environment variables, never in this page</b>, so no token is
+       ever stored in the repository. Set them and restart to turn a channel on. Each watch chooses
+       which of them it uses.`;
+}
+
+// ===========================================================================
+// Alerts: toast, browser notification, sound
+// ===========================================================================
+const recentlyNotified = new Map();
+
 function handleAlerts(alerts) {
   let played = false;
   for (const a of alerts) {
     const key = `${a.fqn}|${a.dc}`;
-    const last = notifiedRecently.get(key) || 0;
-    if (Date.now() - last < 60000) continue;
-    notifiedRecently.set(key, Date.now());
+    if (Date.now() - (recentlyNotified.get(key) || 0) < 60_000) continue;
+    recentlyNotified.set(key, Date.now());
 
+    const link = orderLink(a, T.subsidiary);
     toast(
-      `${a.flag} ${a.name} available`,
-      `${a.memoryLabel} · ${a.storageLabel}<br>${a.dcLabel} — <b>${a.availLabel}</b> · <span class="srv-code">${a.planCode}</span>`,
-      a.targetId === 'test' ? 'info' : 'alert',
+      `${a.flag || ''} ${a.model || a.name} available`,
+      `${esc(a.memoryLabel)} · ${esc(a.storageLabel)}<br>${esc(a.city || a.dcLabel)} — <b>${esc(a.availLabel)}</b>`
+      + (a.priceText ? ` · <b>${esc(a.priceText)}</b>` : '')
+      + (link ? `<br><a href="${esc(link.url)}" target="_blank" rel="noopener">${link.kind === 'model' ? 'Order this now ↗' : 'Browse this range ↗'}</a>` : ''),
+      a.watchId === 'test' ? 'info' : 'alert',
     );
-    osNotify(a);
+    notifyBrowser(a);
     if (!played) { beep(); played = true; }
   }
 }
 
-function osNotify(a) {
+function notifyBrowser(a) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const n = new Notification(`🟢 ${a.name} — ${a.dcLabel}`, {
-    body: `${a.memoryLabel} · ${a.storageLabel}\n${a.availLabel}  ·  ${a.planCode}`,
+  const link = orderLink(a, T.subsidiary);
+  const n = new Notification(`${a.model || a.name} — ${a.city || a.dcLabel}`, {
+    body: `${a.memoryLabel} · ${a.storageLabel}\n${a.availLabel}${a.priceText ? ` · ${a.priceText}` : ''}`,
     tag: `${a.fqn}|${a.dc}`,
-    renotify: false,
   });
-  n.onclick = () => { window.focus(); n.close(); };
+  n.onclick = () => { window.focus(); if (link) window.open(link.url, '_blank', 'noopener'); n.close(); };
 }
 
 let audioCtx = null;
@@ -154,436 +564,384 @@ function beep() {
       const g = audioCtx.createGain();
       o.type = 'sine'; o.frequency.value = freq;
       g.gain.setValueAtTime(0.0001, t0 + i * 0.16);
-      g.gain.exponentialRampToValueAtTime(0.22, t0 + i * 0.16 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.2, t0 + i * 0.16 + 0.02);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.16 + 0.15);
       o.connect(g).connect(audioCtx.destination);
       o.start(t0 + i * 0.16); o.stop(t0 + i * 0.16 + 0.16);
     });
-  } catch { /* ignore */ }
+  } catch { /* autoplay policy — the toast still shows */ }
 }
 
 function toast(title, bodyHtml, kind = 'alert') {
   const el = document.createElement('div');
-  el.className = `toast ${kind === 'info' ? 'info' : ''}`;
-  el.innerHTML = `<div class="tt">${kind === 'info' ? 'ℹ️' : '🔔'} ${esc(title)}</div><div class="tb">${bodyHtml}</div>`;
+  el.className = `toast ${kind === 'info' ? 'info' : kind === 'bad' ? 'bad' : ''}`;
+  el.innerHTML = `<div class="tt">${esc(title)}</div><div class="tb">${bodyHtml}</div>`;
   $('#toasts').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .4s'; setTimeout(() => el.remove(), 400); }, 9000);
-  el.onclick = () => el.remove();
+  const life = setTimeout(() => {
+    el.style.transition = 'opacity .4s'; el.style.opacity = '0';
+    setTimeout(() => el.remove(), 420);
+  }, kind === 'alert' ? 12000 : 8000);
+  el.onclick = (e) => { if (e.target.tagName !== 'A') { clearTimeout(life); el.remove(); } };
 }
 
-// --------------------------------------------------------------------------
-// rendering: status
-// --------------------------------------------------------------------------
-function renderStatus() {
-  const m = state.meta || {};
-  const pills = [];
-  pills.push(state._sse
-    ? `<span class="pill ok live"><span class="dot"></span>live</span>`
-    : `<span class="pill bad"><span class="dot"></span>offline</span>`);
-
-  if (m.error) pills.push(`<span class="pill bad" title="${esc(m.error)}">poll error</span>`);
-  pills.push(`<span class="pill">updated ${fmtAgo(m.lastOk)}</span>`);
-
-  if (m.lastPoll && m.pollMs) {
-    const next = Math.max(0, Math.round((m.lastPoll + m.pollMs - Date.now()) / 1000));
-    pills.push(`<span class="pill muted">next ${next}s</span>`);
-  }
-  pills.push(`<span class="pill">${(m.configCount || 0).toLocaleString()} configs</span>`);
-
-  const cat = m.catalog || {};
-  pills.push(cat.ok
-    ? `<span class="pill" title="${esc(cat.url || '')}">${cat.count} names · ${esc(m.subsidiary || '')}</span>`
-    : `<span class="pill muted" title="${esc(cat.error || 'catalogue not loaded')}">derived names</span>`);
-
-  if (m.secured) pills.push('<span class="pill ok" title="Shared-secret token required">🔒 secured</span>');
-
-  $('#status').innerHTML = pills.join('');
+// ===========================================================================
+// Filters + controls
+// ===========================================================================
+function chip(label, on, title) {
+  return `<button class="chip" aria-pressed="${on}" ${title ? `title="${esc(title)}"` : ''}>${esc(label)}</button>`;
 }
 
-// --------------------------------------------------------------------------
-// rendering: filter chips
-// --------------------------------------------------------------------------
 function buildFilterChips() {
-  // countries (Canada first, then alpha)
-  const cs = Object.entries(state.static.countries)
-    .filter(([k]) => k && k !== '??')
-    .sort((a, b) => (a[0] === 'CA' ? -1 : b[0] === 'CA' ? 1 : a[0].localeCompare(b[0])));
-  const cc = $('#f-countries');
-  cc.querySelectorAll('.chip').forEach((n) => n.remove());
-  for (const [code, info] of cs) {
-    cc.appendChild(chip(`${info.flag} ${code}`, filters.countries.has(code), code === 'CA' ? 'ca' : '', () => {
-      toggle(filters.countries, code); refreshChips(cc, filters.countries); render();
-    }));
+  // Built from live data only. The static datacenter map lists locations (vin,
+  // hil, eri) that currently have no rows at all, and offering them as filters
+  // produced controls that could only ever return nothing.
+  const countries = [];
+  const seen = new Set();
+  for (const d of state.dcs) {
+    if (seen.has(d.country)) continue;
+    seen.add(d.country);
+    countries.push(d);
   }
+  $('#f-countries').innerHTML = countries.map((d) =>
+    chip(`${d.flag} ${d.country}`, filters.countries.has(d.country), `${d.countryName} — also narrows the datacenter columns`)).join('');
+  bind('#f-countries', countries.map((d) => d.country), filters.countries);
 
-  const kc = $('#f-kinds');
-  kc.querySelectorAll('.chip').forEach((n) => n.remove());
-  for (const k of KINDS) {
-    kc.appendChild(chip(k, filters.kinds.has(k), '', () => { toggle(filters.kinds, k); refreshChips(kc, filters.kinds); render(); }));
-  }
+  const kinds = STORAGE_KINDS.filter((k) => state.configs.some((c) => c.storageKinds.includes(k)));
+  $('#f-kinds').innerHTML = kinds.map((k) => chip(k, filters.kinds.has(k))).join('');
+  bind('#f-kinds', kinds, filters.kinds);
 
-  const rc = $('#f-ranges');
-  rc.querySelectorAll('.chip').forEach((n) => n.remove());
-  const ranges = Object.entries(state.static.ranges).sort((a, b) => a[1].label.localeCompare(b[1].label));
-  for (const [code, info] of ranges) {
-    rc.appendChild(chip(info.label, filters.ranges.has(code), '', () => { toggle(filters.ranges, code); refreshChips(rc, filters.ranges); render(); }));
-  }
+  const ranges = Object.entries(state.ranges)
+    .filter(([r, info]) => filters.nonEco || info.eco)
+    .sort((a, b) => a[1].label.localeCompare(b[1].label));
+  $('#f-ranges').innerHTML = ranges.map(([r, info]) =>
+    chip(info.label, filters.ranges.has(r), `${info.count.toLocaleString()} configurations`)).join('');
+  bind('#f-ranges', ranges.map(([r]) => r), filters.ranges);
 }
 
-function chip(label, on, extra, onClick) {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.className = `chip ${extra} ${on ? 'on' : ''}`;
-  b.textContent = label;
-  b.dataset.val = label;
-  b.onclick = onClick;
-  return b;
-}
-function toggle(set, v) { set.has(v) ? set.delete(v) : set.add(v); }
-function refreshChips(container, set) {
-  container.querySelectorAll('.chip').forEach((c) => {
-    // match by the trailing token (country code / kind / label)
-    c.classList.toggle('on', [...set].some((v) => c.dataset.val.endsWith(v) || c.dataset.val === v));
+/** Chip state is driven by the VALUE, not by matching against the label.
+ *  The previous build compared a chip's label to the filter's code — so
+ *  "So you Start".endsWith("soyoustart") was false and every range chip looked
+ *  unselected even while it was filtering. */
+function bind(sel, values, set) {
+  const chips = $(sel).querySelectorAll('.chip');
+  chips.forEach((el, i) => {
+    const v = values[i];
+    el.onclick = () => {
+      set.has(v) ? set.delete(v) : set.add(v);
+      el.setAttribute('aria-pressed', String(set.has(v)));
+      persist();
+      render();
+    };
   });
 }
 
-// --------------------------------------------------------------------------
-// rendering: results table
-// --------------------------------------------------------------------------
-function clientMatch(c, dc, avail, rule) {
-  if (!rule) return false;
-  if (rule.ranges?.length && !rule.ranges.includes(c.range)) return false;
-  if (rule.storageKinds?.length && !rule.storageKinds.some((k) => c.storageKinds.includes(k))) return false;
-  if (rule.storageContains && !(c.storageRaw || '').toLowerCase().includes(rule.storageContains.toLowerCase())) return false;
-  if (rule.planCodes?.length && !rule.planCodes.includes(c.planCode)) return false;
-  if (rule.minRamGB && (c.ramGB || 0) < rule.minRamGB) return false;
-  if (rule.search) {
-    const q = rule.search.toLowerCase();
-    if (!`${c.fqn} ${c.name} ${c.memoryLabel} ${c.storageLabel} ${c.rangeLabel}`.toLowerCase().includes(q)) return false;
-  }
-  const info = state.static.datacenters[dc] || { country: '??' };
-  if (rule.datacenters?.length && !rule.datacenters.includes(dc)) return false;
-  if (rule.countries?.length && !rule.countries.includes(info.country)) return false;
-  const am = AV(avail);
-  const ok = am.orderable || (rule.includeComingSoon && am.state === 'comingSoon');
-  if (!ok) return false;
-  if (rule.inStockOnly && !am.inStock) return false;
-  return true;
+function resetFilters() {
+  filters.search = ''; filters.countries.clear(); filters.kinds.clear();
+  filters.ranges.clear(); filters.tiers.clear();
+  $('#f-search').value = '';
+  persist(); buildFilterChips(); render();
 }
 
-function buildRows() {
-  const rows = [];
-  let available = 0;
-  for (const c of state.configs) {
-    for (const dc in c.dc) {
-      const avail = c.dc[dc];
-      const am = AV(avail);
-      const info = state.static.datacenters[dc] || { country: '??', flag: '🌐', city: dc, countryName: 'Other' };
-      // filters
-      if (filters.avail === 'orderable' && !am.orderable) continue;
-      if (filters.avail === 'instock' && !am.inStock) continue;
-      if (filters.countries.size && !filters.countries.has(info.country)) continue;
-      if (filters.dcs.size && !filters.dcs.has(dc)) continue;
-      if (filters.ranges.size && !filters.ranges.has(c.range)) continue;
-      if (filters.kinds.size && !c.storageKinds.some((k) => filters.kinds.has(k))) continue;
-      if (filters.ram && (c.ramGB || 0) < filters.ram) continue;
-      if (filters.search) {
-        const q = filters.search.toLowerCase();
-        if (!`${c.fqn} ${c.name} ${c.memoryLabel} ${c.storageLabel} ${c.rangeLabel} ${dc}`.toLowerCase().includes(q)) continue;
-      }
-      if (am.orderable) available++;
-      const isTarget = state.targets.some((t) => t.enabled && clientMatch(c, dc, avail, t.rule));
-      rows.push({ c, dc, avail, am, info, isTarget });
+function applyTheme() {
+  const root = document.documentElement;
+  if (theme === 'auto') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', theme);
+  $('#b-theme').title = `Theme: ${theme}. Click to change.`;
+}
+
+function measureChrome() {
+  const root = document.documentElement;
+  const rail = $('#rail'), f = $('#filters');
+  if (rail) root.style.setProperty('--topbar-h', `${rail.offsetHeight}px`);
+  if (f) root.style.setProperty('--filters-h', `${f.offsetHeight}px`);
+}
+
+function wire() {
+  $('#b-refresh').onclick = async () => {
+    const r = await T.refresh();
+    if (!r.ok) toast('Cannot check now', esc(r.error || 'try again in a moment'), 'info');
+  };
+  if (T.isStatic) {
+    $('#b-refresh').title = 'This is a published snapshot — it refreshes on its own schedule';
+  }
+
+  $('#b-sound').onclick = () => {
+    muted = !muted;
+    $('#b-sound').textContent = muted ? '🔇' : '🔊';
+    $('#b-sound').title = muted ? 'Unmute the alert sound' : 'Mute the alert sound';
+    persist();
+  };
+
+  $('#b-theme').onclick = () => {
+    theme = theme === 'auto' ? 'dark' : theme === 'dark' ? 'light' : 'auto';
+    applyTheme(); persist();
+  };
+
+  $('#b-alerts').onclick = async () => {
+    if (!('Notification' in window)) {
+      toast('Not available here', 'This browser has no notification support.', 'info');
+      return;
     }
+    const p = await Notification.requestPermission();
+    updateAlertButton();
+    if (p === 'granted') toast('Browser alerts on', 'You will be told when a watch matches, while this tab is open.', 'info');
+    else toast('Browser alerts blocked', 'Your browser refused. Toasts and the sound still work.', 'info');
+  };
+
+  let dt;
+  $('#f-search').value = filters.search;
+  $('#f-search').oninput = (e) => {
+    clearTimeout(dt);
+    dt = setTimeout(() => { filters.search = e.target.value.trim(); persist(); render(); }, 150);
+  };
+
+  $('#f-noneco').checked = filters.nonEco;
+  $('#f-noneco').onchange = async (e) => {
+    filters.nonEco = e.target.checked;
+    persist();
+    if (filters.nonEco && !T.hasFull()) {
+      // Non-eco rows live in the larger snapshot, fetched only when asked for.
+      toast('Loading every range', 'Fetching the full set, including servers with no public price.', 'info');
+      try {
+        const data = await T.loadState({ full: true });
+        absorb(data);
+      } catch (err) {
+        toast('Could not load them', esc(err.message || err), 'bad');
+        filters.nonEco = false; $('#f-noneco').checked = false;
+      }
+    }
+    buildFilterChips(); render();
+  };
+
+  $('#f-reset').onclick = resetFilters;
+  $('#b-hist-toggle').onclick = () => { showHistory = !showHistory; persist(); renderHistory(); };
+  $('#b-chan-toggle').onclick = () => { showChannels = !showChannels; persist(); renderChannels(); };
+
+  $('#b-close').onclick = closeModal;
+  $('#b-cancel').onclick = closeModal;
+  $('#modal').onclick = (e) => { if (e.target.id === 'modal') closeModal(); };
+  $('#watch-form').onsubmit = submitWatch;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+  setInterval(renderStatus, 1000);
+  window.addEventListener('resize', measureChrome);
+  if ('ResizeObserver' in window) {
+    const ro = new ResizeObserver(measureChrome);
+    ro.observe($('#rail')); ro.observe($('#filters'));
   }
-  sortRows(rows);
-  return { rows, available };
 }
 
-function sortRows(rows) {
-  const k = sort.key, d = sort.dir;
-  const get = {
-    range: (r) => r.c.rangeLabel,
-    name: (r) => r.c.name,
-    ram: (r) => r.c.ramGB || 0,
-    storage: (r) => r.c.storageLabel,
-    price: (r) => r.c.price, // may be null (config has no catalogue price)
-    dc: (r) => r.info.countryName + r.dc,
-    avail: (r) => r.am.rank,
-  }[k] || ((r) => r.am.rank);
-  rows.sort((a, b) => {
-    const va = get(a), vb = get(b);
-    // rows missing the value (e.g. no price) always sink to the bottom
-    const an = va == null, bn = vb == null;
-    if (an && bn) return a.am.rank - b.am.rank;
-    if (an) return 1;
-    if (bn) return -1;
-    let c = typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb));
-    if (c === 0) c = a.am.rank - b.am.rank;
-    return c * d;
-  });
+function updateAlertButton() {
+  const b = $('#b-alerts');
+  if (!('Notification' in window)) { b.hidden = true; return; }
+  const p = Notification.permission;
+  b.classList.toggle('on', p === 'granted');
+  b.textContent = p === 'granted' ? '🔔' : '🔕';
+  b.title = p === 'granted' ? 'Browser alerts are on' : 'Turn on browser alerts';
 }
 
-function render() {
-  const { rows, available } = buildRows();
-  const body = $('#grid-body');
-  const shown = rows.slice(0, CAP);
-
-  if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">No configurations match these filters.<br><small>Try widening the country or “Show” filter.</small></td></tr>`;
-  } else {
-    body.innerHTML = shown.map(rowHtml).join('');
-    body.querySelectorAll('button[data-copy]').forEach((b) => {
-      b.onclick = () => copyCode(b.dataset.copy);
-    });
-  }
-
-  const tgtCount = rows.filter((r) => r.isTarget).length;
-  $('#results-count').innerHTML =
-    `<b>${available.toLocaleString()}</b> orderable · showing <b>${shown.length.toLocaleString()}</b> of ${rows.length.toLocaleString()}` +
-    (tgtCount ? ` · <span style="color:var(--accent)">★ ${tgtCount} target match${tgtCount > 1 ? 'es' : ''}</span>` : '') +
-    (rows.length > CAP ? ` <small>(capped at ${CAP} — narrow filters to see more)</small>` : '');
-  applySortIndicators();
-}
-
-// Mark the active column header with an asc/desc arrow.
-function applySortIndicators() {
-  $$('.grid thead th[data-sort]').forEach((th) => {
-    const active = th.dataset.sort === sort.key;
-    th.classList.toggle('sorted-asc', active && sort.dir === 1);
-    th.classList.toggle('sorted-desc', active && sort.dir === -1);
-  });
-}
-
-function rowHtml(r) {
-  const { c, dc, am, info, isTarget } = r;
-  const priceCell = c.priceText
-    ? `${esc(c.priceText)}<span class="per">/mo</span>`
-    : (c.price != null ? `${esc(fmtPrice(c.price, c.currency))}<span class="per">/mo</span>` : '<span class="dash">—</span>');
-  const verify = `https://eu.api.ovh.com/1.0/dedicated/server/datacenter/availabilities?planCode=${encodeURIComponent(c.planCode)}&datacenters=${encodeURIComponent(dc)}`;
-  return `<tr class="${isTarget ? 'target' : ''} ${flashing.has(c.fqn) ? 'flash' : ''}">
-    <td><span class="rangetag"><span class="swatch" style="background:${c.rangeColor}"></span>${esc(c.rangeLabel)}${c.game ? ' <small>Game</small>' : ''}</span></td>
-    <td><div class="srv-name">${esc(c.name)}</div><div class="srv-code">${esc(c.planCode)}</div></td>
-    <td class="num">${c.ramGB ? c.ramGB + ' GB' : '—'}</td>
-    <td>${esc(c.storageLabel)} <span class="stor-kind">${esc(c.storageKind)}</span></td>
-    <td class="num price-cell">${priceCell}</td>
-    <td><span class="loc"><span class="flag">${info.flag}</span> ${esc(info.city)}, ${esc(info.countryName)} <span class="dc-code">${esc(dc)}</span></span></td>
-    <td><span class="badge ${am.state}">${esc(am.label)}${isTarget ? ' ★' : ''}</span></td>
-    <td><div class="rowact">
-      <button data-copy="${esc(c.planCode)}" title="Copy plan code">⧉</button>
-      <a href="${verify}" target="_blank" rel="noopener" title="Verify on OVH API">API↗</a>
-    </div></td>
-  </tr>`;
-}
-
-async function copyCode(code) {
-  try { await navigator.clipboard.writeText(code); toast('Copied', `Plan code <span class="srv-code">${esc(code)}</span> copied — paste into OVH order.`, 'info'); }
-  catch { toast('Copy failed', esc(code), 'info'); }
-}
-
-// --------------------------------------------------------------------------
-// rendering: targets
-// --------------------------------------------------------------------------
-function renderTargets() {
-  const grid = $('#target-grid');
-  grid.innerHTML = state.targets.map(targetCard).join('') || '<div class="empty">No targets yet.</div>';
-  state.targets.forEach((t) => {
-    $(`#tgt-${t.id} .switch`)?.addEventListener('click', () => toggleTarget(t));
-    $(`#tgt-${t.id} .edit`)?.addEventListener('click', () => openModal(t));
-    $(`#tgt-${t.id} .del`)?.addEventListener('click', () => deleteTarget(t));
-  });
-}
-
-function targetCard(t) {
-  const hot = t.inStockCount > 0;
-  const hit = t.matchCount > 0;
-  const sample = (t.sample || []).slice(0, 8).map((m) =>
-    `<span class="sc s-${AV(m.availability).state}">${m.flag} ${esc(m.name)} · ${esc(m.storageLabel.split(' + ')[0])} · ${esc(m.availLabel)}</span>`).join('');
-  const more = t.matchCount > 8 ? `<span class="more">+${t.matchCount - 8} more</span>` : '';
-  return `<div class="target-card ${hit ? 'hit' : ''} ${t.enabled ? '' : 'off'}" id="tgt-${t.id}">
-    <div class="tc-actions">
-      <button class="icon-btn switch" title="${t.enabled ? 'Disable' : 'Enable'}">${t.enabled ? '⏸' : '▶'}</button>
-      <button class="icon-btn edit" title="Edit">✎</button>
-      <button class="icon-btn del" title="Delete">🗑</button>
-    </div>
-    <div class="tc-top"><h3>${t.notify ? '🔔 ' : ''}${esc(t.name)}</h3></div>
-    <div class="crit">${esc(t.criteria)}</div>
-    <div class="tc-counts">
-      <div><div class="big ${hit ? (hot ? 'hot' : '') : 'zero'}">${t.matchCount}</div><div class="lbl">matches</div></div>
-      <div><div class="big instock ${hot ? '' : 'zero'}">${t.inStockCount}</div><div class="lbl">in stock</div></div>
-    </div>
-    <div class="tc-sample">${sample || '<span class="more">no matches right now</span>'} ${more}</div>
-  </div>`;
-}
-
-async function toggleTarget(t) {
-  await fetch(`/api/targets/${t.id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !t.enabled }) })
-    .then((r) => r.json()).then((d) => { if (d.targets) { state.targets = d.targets; renderTargets(); render(); } });
-}
-async function deleteTarget(t) {
-  if (!confirm(`Delete target “${t.name}”?`)) return;
-  await fetch(`/api/targets/${t.id}`, { method: 'DELETE' }).then((r) => r.json())
-    .then((d) => { if (d.targets) { state.targets = d.targets; renderTargets(); render(); } });
-}
-
-// --------------------------------------------------------------------------
-// target editor modal
-// --------------------------------------------------------------------------
+// ===========================================================================
+// Watch editor
+// ===========================================================================
 const editor = { id: null, sel: null };
 
-function buildEditorChips(rule) {
+function editorChips(container, values, labels, set) {
+  $(container).innerHTML = values.map((v, i) => chip(labels[i], set.has(v))).join('');
+  $(container).querySelectorAll('.chip').forEach((el, i) => {
+    el.onclick = () => {
+      const v = values[i];
+      set.has(v) ? set.delete(v) : set.add(v);
+      el.setAttribute('aria-pressed', String(set.has(v)));
+    };
+  });
+}
+
+function hhmm(mins) {
+  if (mins == null) return '';
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+
+function openModal(w) {
+  const rule = w?.rule || {};
+  editor.id = w?.id || null;
   editor.sel = {
     countries: new Set(rule.countries || []),
     kinds: new Set(rule.storageKinds || []),
     ranges: new Set(rule.ranges || []),
-    dcs: new Set(rule.datacenters || []),
+    channels: new Set(w?.channels || ['browser']),
   };
-  const fill = (containerId, options, set, valueOf, labelOf) => {
-    const el = $(containerId);
-    el.innerHTML = '';
-    for (const o of options) {
-      const v = valueOf(o);
-      el.appendChild(chip(labelOf(o), set.has(v), '', (ev) => {
-        toggle(set, v);
-        ev.currentTarget.classList.toggle('on');
-      }));
-    }
+  $('#modal-title').textContent = w ? 'Edit watch' : 'New watch';
+  $('#w-name').value = w?.name || '';
+  $('#w-ram').value = rule.minRamGB || '';
+  $('#w-cool').value = w?.cooldownMinutes || '';
+  $('#w-q1').value = hhmm(w?.quietFrom ?? null);
+  $('#w-q2').value = hhmm(w?.quietTo ?? null);
+  $('#w-storage').value = rule.storageContains || '';
+  $('#w-plans').value = (rule.planCodes || []).join(', ');
+  $('#w-instock').checked = !!rule.inStockOnly;
+  $('#w-soon').checked = !!rule.includeComingSoon;
+  $('#w-enabled').checked = w ? w.enabled !== false : true;
+  $('#b-delete').hidden = !w;
+  $('#b-delete').onclick = () => {
+    if (w && confirm(`Delete the watch “${w.name}”?`)) { mutate(() => T.store.remove(w.id)); closeModal(); }
   };
-  const countries = Object.entries(state.static.countries).filter(([k]) => k && k !== '??')
-    .sort((a, b) => (a[0] === 'CA' ? -1 : b[0] === 'CA' ? 1 : a[0].localeCompare(b[0])));
-  fill('#e-countries', countries, editor.sel.countries, ([code]) => code, ([code, info]) => `${info.flag} ${code}`);
-  fill('#e-kinds', KINDS, editor.sel.kinds, (k) => k, (k) => k);
-  fill('#e-ranges', Object.entries(state.static.ranges).sort((a, b) => a[1].label.localeCompare(b[1].label)),
-    editor.sel.ranges, ([code]) => code, ([, info]) => info.label);
-  fill('#e-dcs', Object.entries(state.static.datacenters).sort((a, b) => a[0].localeCompare(b[0])),
-    editor.sel.dcs, ([code]) => code, ([code, info]) => `${info.flag} ${code}`);
+
+  const countries = [...new Set(state.dcs.map((d) => d.country))];
+  editorChips('#w-countries', countries, countries.map((c) => {
+    const d = state.dcs.find((x) => x.country === c);
+    return `${d.flag} ${c}`;
+  }), editor.sel.countries);
+  editorChips('#w-kinds', STORAGE_KINDS, STORAGE_KINDS, editor.sel.kinds);
+  const ranges = Object.keys(state.ranges).sort();
+  editorChips('#w-ranges', ranges, ranges.map((r) => state.ranges[r].label), editor.sel.ranges);
+
+  const avail = T.isStatic ? ['browser'] : state.channels.filter((c) => c.configured).map((c) => c.channel);
+  editorChips('#w-channels', avail, avail.map((c) => CHANNEL_LABEL[c]), editor.sel.channels);
+  $('#w-channels-help').textContent = T.isStatic
+    ? 'This page can only alert this browser, while a tab is open.'
+    : 'Only channels that are set up appear here.';
+
+  $('#modal').hidden = false;
+  $('#w-name').focus();
 }
 
-function openModal(t) {
-  const rule = t ? t.rule : { countries: [], storageKinds: [], ranges: [], datacenters: [] };
-  editor.id = t ? t.id : null;
-  $('#modal-title').textContent = t ? 'Edit target' : 'New target';
-  const f = $('#target-form');
-  f.name.value = t ? t.name : '';
-  f.minRamGB.value = rule.minRamGB || '';
-  f.storageContains.value = rule.storageContains || '';
-  f.planCodes.value = (rule.planCodes || []).join(', ');
-  f.search.value = rule.search || '';
-  f.inStockOnly.checked = !!rule.inStockOnly;
-  f.includeComingSoon.checked = !!rule.includeComingSoon;
-  f.notify.checked = t ? t.notify !== false : true;
-  f.enabled.checked = t ? t.enabled !== false : true;
-  $('#btn-delete-target').hidden = !t;
-  buildEditorChips(rule);
-  $('#modal').hidden = false;
-}
 function closeModal() { $('#modal').hidden = true; editor.id = null; }
 
-async function submitTarget(e) {
+function clockToMinutes(v) {
+  if (!v) return null;
+  const [h, m] = v.split(':').map(Number);
+  return Number.isFinite(h) ? h * 60 + (m || 0) : null;
+}
+
+async function submitWatch(e) {
   e.preventDefault();
-  const f = e.target;
   const body = {
-    name: f.name.value.trim() || 'Untitled target',
+    name: $('#w-name').value.trim() || 'Untitled watch',
     countries: [...editor.sel.countries],
     storageKinds: [...editor.sel.kinds],
     ranges: [...editor.sel.ranges],
-    datacenters: [...editor.sel.dcs],
-    storageContains: f.storageContains.value.trim(),
-    planCodes: f.planCodes.value.split(',').map((s) => s.trim()).filter(Boolean),
-    search: f.search.value.trim(),
-    minRamGB: f.minRamGB.value ? Number(f.minRamGB.value) : null,
-    inStockOnly: f.inStockOnly.checked,
-    includeComingSoon: f.includeComingSoon.checked,
-    notify: f.notify.checked,
-    enabled: f.enabled.checked,
+    channels: [...editor.sel.channels],
+    storageContains: $('#w-storage').value.trim(),
+    planCodes: $('#w-plans').value.split(',').map((s) => s.trim()).filter(Boolean),
+    minRamGB: $('#w-ram').value ? Number($('#w-ram').value) : null,
+    cooldownMinutes: $('#w-cool').value ? Number($('#w-cool').value) : 0,
+    quietFrom: clockToMinutes($('#w-q1').value),
+    quietTo: clockToMinutes($('#w-q2').value),
+    inStockOnly: $('#w-instock').checked,
+    includeComingSoon: $('#w-soon').checked,
+    enabled: $('#w-enabled').checked,
+    notify: true,
   };
-  const url = editor.id ? `/api/targets/${editor.id}` : '/api/targets';
-  const method = editor.id ? 'PUT' : 'POST';
-  const d = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
-  if (d.targets) { state.targets = d.targets; renderTargets(); render(); }
-  closeModal();
-}
-
-// --------------------------------------------------------------------------
-// misc helpers + wiring
-// --------------------------------------------------------------------------
-function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function fmtPrice(v, cur) {
-  try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'EUR', maximumFractionDigits: 2 }).format(v); }
-  catch { return `${v} ${cur || ''}`; }
-}
-
-async function enableNotifications() {
-  if (!('Notification' in window)) { toast('Not supported', 'This browser has no Notification API.', 'info'); return; }
-  const p = await Notification.requestPermission();
-  const btn = $('#btn-notify');
-  if (p === 'granted') { btn.textContent = '🔔 Alerts on'; btn.classList.add('on'); toast('Alerts enabled', 'You’ll get a desktop notification when a target matches.', 'info'); }
-  else { btn.textContent = '🔔 Alerts blocked'; }
-}
-
-function wire() {
-  $('#btn-notify').onclick = enableNotifications;
-  $('#btn-mute').onclick = () => { muted = !muted; $('#btn-mute').textContent = muted ? '🔇' : '🔊'; $('#btn-mute').classList.toggle('on', !muted); };
-  $('#btn-refresh').onclick = () => fetch('/api/refresh', { method: 'POST' });
-  $('#btn-test').onclick = () => fetch('/api/test-alert', { method: 'POST' });
-  $('#btn-add-target').onclick = () => openModal(null);
-  $('#btn-cancel').onclick = closeModal;
-  $('#btn-delete-target').onclick = async () => {
-    if (editor.id && confirm('Delete this target?')) {
-      await fetch(`/api/targets/${editor.id}`, { method: 'DELETE' }).then((r) => r.json())
-        .then((d) => { if (d.targets) { state.targets = d.targets; renderTargets(); render(); } });
-      closeModal();
-    }
-  };
-  $('#target-form').onsubmit = submitTarget;
-  $('#modal').onclick = (e) => { if (e.target.id === 'modal') closeModal(); };
-
-  let dt;
-  $('#f-search').oninput = (e) => { clearTimeout(dt); dt = setTimeout(() => { filters.search = e.target.value.trim(); render(); }, 150); };
-  $('#f-ram').onchange = (e) => { filters.ram = Number(e.target.value); render(); };
-  $('#f-avail').onchange = (e) => { filters.avail = e.target.value; render(); };
-  $('#f-reset').onclick = () => {
-    filters.search = ''; filters.countries = new Set(['CA']); filters.dcs = new Set();
-    filters.ranges = new Set(); filters.kinds = new Set(); filters.ram = 0; filters.avail = 'orderable';
-    $('#f-search').value = ''; $('#f-ram').value = '0'; $('#f-avail').value = 'orderable';
-    buildFilterChips(); render();
-  };
-
-  $$('.grid thead th[data-sort]').forEach((th) => {
-    th.onclick = () => { const k = th.dataset.sort; sort.dir = sort.key === k ? -sort.dir : 1; sort.key = k; render(); };
-  });
-
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-
-  // refresh "ago/next" counters every second
-  setInterval(renderStatus, 1000);
-}
-
-// Keep the sticky filter bar + table header glued to the real chrome heights,
-// which change when the filter chips wrap at different widths.
-function setupSticky() {
-  const root = document.documentElement;
-  const tb = document.querySelector('.topbar');
-  const fl = document.querySelector('.filters');
-  const apply = () => {
-    if (tb) root.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
-    if (fl) root.style.setProperty('--filters-h', fl.offsetHeight + 'px');
-  };
-  apply();
-  if ('ResizeObserver' in window) {
-    const ro = new ResizeObserver(apply);
-    if (tb) ro.observe(tb);
-    if (fl) ro.observe(fl);
+  try {
+    if (editor.id) await T.store.update(editor.id, body);
+    else await T.store.create(body);
+    await syncWatches();
+    closeModal();
+    toast('Watch saved', esc(body.name), 'info');
+  } catch (err) {
+    toast('That did not save', esc(err.message || err), 'bad');
   }
-  window.addEventListener('resize', apply);
+}
+
+// ===========================================================================
+// Boot
+// ===========================================================================
+function absorb(data) {
+  state.meta = data.meta || state.meta;
+  if (data.dcs) state.dcs = data.dcs;
+  if (data.ranges) state.ranges = data.ranges;
+  if (data.configs) {
+    state.configs = data.configs;
+    state.byFqn = new Map(data.configs.map((c) => [c.fqn, c]));
+  }
+  if (data.events) state.events = [...data.events].reverse();
+  if (data.watches) { T.store.absorb(data.watches); state.watches = data.watches; }
+}
+
+function applyUpdate(msg) {
+  // Server mode sends deltas; static mode hands over a whole fresh snapshot.
+  if (msg.configs) {
+    absorb(msg);
+  } else {
+    state.meta = msg.meta || state.meta;
+    if (Array.isArray(msg.changes) && msg.changes.length) {
+      for (const c of msg.changes) state.byFqn.set(c.fqn, c);
+      state.configs = [...state.byFqn.values()];
+    }
+    if (msg.watches) { T.store.absorb(msg.watches); state.watches = msg.watches; }
+    if (Array.isArray(msg.events) && msg.events.length) {
+      state.events = [...msg.events.reverse(), ...state.events].slice(0, 400);
+    }
+  }
+
+  if (T.isStatic) {
+    const res = T.store.evaluate(state.configs);
+    state.watches = res.summaries;
+    if (res.alerts.length) handleAlerts(res.alerts);
+    reportMissed();
+  } else if (Array.isArray(msg.alerts) && msg.alerts.length) {
+    handleAlerts(msg.alerts);
+  }
+
+  renderWatches();
+  renderHistory();
+  render();
+}
+
+function reportMissed() {
+  const m = T.store.missed;
+  if (!m) return;
+  T.store.missed = null;
+  if (!m.count) return;
+  toast(
+    'While you were away',
+    `<b>${m.count}</b> matching server${m.count > 1 ? 's' : ''} appeared in the last ${fmtDur(m.sinceMs)}.`
+    + ' They are in the table now — you were not notified one by one.',
+    'info',
+  );
 }
 
 (async function init() {
+  applyTheme();
   wire();
-  if ('Notification' in window && Notification.permission === 'granted') {
-    $('#btn-notify').textContent = '🔔 Alerts on'; $('#btn-notify').classList.add('on');
+  updateAlertButton();
+  $('#b-sound').textContent = muted ? '🔇' : '🔊';
+
+  try {
+    const data = await T.loadState({ full: filters.nonEco });
+    absorb(data);
+
+    if (T.isStatic) {
+      // A first-time visitor gets one worked example rather than an empty page.
+      // It is a generic starting point, not anyone's real watch.
+      if (T.store.seedDefaults()) T.store.evaluate(state.configs);
+      const res = T.store.evaluate(state.configs);
+      state.watches = res.summaries;
+      reportMissed();
+    }
+
+    state.channels = (await T.loadChannels()).channels || [];
+    if (!T.isStatic) {
+      const h = await T.loadHistory();
+      if (h) state.events = h.events;
+    }
+
+    buildFilterChips();
+    renderWatches();
+    renderHistory();
+    renderChannels();
+    render();
+    measureChrome();
+  } catch (err) {
+    $('#empty').innerHTML = `<div class="state">
+      <h3>Could not load the data</h3>
+      <p>${esc(err.message || err)}</p>
+      <button class="btn small fix" onclick="location.reload()">Try again</button>
+    </div>`;
   }
-  try { await loadState(); } catch (e) { $('#results-count').textContent = 'Failed to load: ' + e.message; }
-  connectStream();
-  setupSticky();
+
+  T.subscribe({
+    onUpdate: applyUpdate,
+    onStatus: (s) => { state.connected = !!s.connected; if (s.meta) state.meta = s.meta; renderStatus(); },
+  });
 })();

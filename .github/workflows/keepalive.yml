@@ -1,0 +1,27 @@
+# GitHub disables scheduled workflows in a public repository after 60 days with
+# no repository activity. For a monitor that is a silent failure: the dashboard
+# simply stops updating and nothing says so. This nudges the repository once a
+# month so the schedule stays alive.
+
+name: Keep the schedule alive
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'   # 06:00 UTC on the first of each month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          date -u +%FT%TZ > .github/last-keepalive
+          git add .github/last-keepalive
+          git commit -q -m 'chore: keep the scheduled workflow enabled'
+          git push

@@ -1,11 +1,17 @@
 {
-  "name": "kimsufi-monitor",
-  "version": "1.0.0",
+  "name": "kimsufi-watch",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Live OVH Eco (Kimsufi / Rise / So you Start / Advance / Scale) per-configuration availability monitor with notification targets.",
+  "description": "Live OVH Eco (Kimsufi / Rise / So you Start / Advance) availability, per configuration and per datacenter, with watches and notifications.",
+  "license": "MIT",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node bin/check.js",
+    "snapshot": "node bin/check.js --snapshot-only",
+    "build": "node bin/build-static.js",
+    "test": "node --test \"test/*.test.js\"",
+    "channels": "node bin/check.js --channels"
   },
   "engines": {
     "node": ">=18"

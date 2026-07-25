@@ -1,0 +1,111 @@
+# The public deployment: publish a snapshot, notify nobody.
+#
+# This workflow deliberately runs with no notification secrets and no watches.
+# It exists to keep the public dashboard fresh. Personal alerting belongs in a
+# private fork — see docs/deploy-your-own.md — because watches and channel
+# tokens would otherwise be readable by anyone who can read this repository.
+#
+# Two GitHub constraints shape it, both verified rather than assumed:
+#   * `schedule` has a five-minute floor, and runs can be delayed or dropped
+#     when Actions is busy. The page says so rather than implying a live feed.
+#   * Scheduled workflows in a public repository are disabled automatically
+#     after 60 days without repository activity, which is what keepalive.yml is
+#     for.
+
+name: Publish snapshot
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'public/**'
+      - 'core/**'
+      - 'bin/**'
+      - '.github/workflows/check.yml'
+
+permissions:
+  contents: write   # to force-push the state branch
+  pages: write
+  id-token: write
+
+# Never let two runs publish at once, but let a run in progress finish rather
+# than cancelling it: a cancelled run loses the diff baseline for this tick.
+concurrency:
+  group: publish-snapshot
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The previous availability map, so this run can tell what changed.
+      # A single-commit orphan branch: at 288 runs a day, keeping history would
+      # add roughly 105,000 commits a year for data nobody reads twice.
+      - name: Restore previous state
+        run: |
+          mkdir -p data
+          if git fetch --depth=1 origin state 2>/dev/null; then
+            git show origin/state:previous.json > data/previous.json 2>/dev/null || true
+            git show origin/state:events.jsonl  > data/events.jsonl  2>/dev/null || true
+            echo "restored $(wc -c < data/previous.json 2>/dev/null || echo 0) bytes of previous state"
+          else
+            echo "no state branch yet — this run seeds it and records no transitions"
+          fi
+
+      - name: Poll OVH and write the snapshot
+        run: node bin/check.js --snapshot-only --out dist
+        env:
+          OVH_SUBSIDIARY: ${{ vars.OVH_SUBSIDIARY || 'CA' }}
+
+      - name: Build the static dashboard
+        run: node bin/build-static.js --out dist
+        env:
+          OVH_SUBSIDIARY: ${{ vars.OVH_SUBSIDIARY || 'CA' }}
+
+      # A published bundle must never carry a token or anyone's watches. This is
+      # the gate, not a comment expressing hope.
+      - name: Refuse to publish secrets
+        run: |
+          set -e
+          for pattern in 'TELEGRAM_BOT_TOKEN=' 'SMTP_PASS' 'NTFY_TOKEN=' 'hooks.slack.com' 'discord.com/api/webhooks'; do
+            if grep -rqI "$pattern" dist; then
+              echo "::error::the bundle contains '$pattern' — refusing to publish"
+              exit 1
+            fi
+          done
+          if grep -qI '"watchName"' dist/snapshot.json dist/snapshot-full.json; then
+            echo "::error::the snapshot carries watch attribution — refusing to publish"
+            exit 1
+          fi
+          echo "no secrets or watch data in dist/"
+          ls -la dist
+          echo "snapshot.json: $(gzip -c dist/snapshot.json | wc -c) bytes gzipped"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - uses: actions/deploy-pages@v4
+
+      - name: Save state
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          rm -rf .state && mkdir .state
+          cp data/previous.json .state/previous.json
+          [ -f data/events.jsonl ] && cp data/events.jsonl .state/events.jsonl || true
+          cd .state
+          git init -q -b state
+          git add -A
+          git commit -q -m "state at $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" state:state
+          echo "state branch now holds exactly one commit"

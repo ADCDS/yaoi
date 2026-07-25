@@ -34,13 +34,19 @@ function parseClock(v) {
   return h * 60 + min;
 }
 
+/**
+ * The starter watch a fresh install (or a first-time visitor) sees.
+ *
+ * Deliberately generic: it demonstrates what a watch is without encoding
+ * anybody's actual shopping list. Nothing personal ships in this repository.
+ */
 export function defaultWatches() {
   return [
     {
       id: uuid(),
-      name: 'Canada · NVMe',
+      name: 'Example — NVMe in stock anywhere',
       enabled: true,
-      countries: ['CA'],
+      countries: [],
       datacenters: [],
       ranges: [],
       storageKinds: ['NVMe'],
@@ -48,7 +54,7 @@ export function defaultWatches() {
       planCodes: [],
       search: '',
       minRamGB: null,
-      inStockOnly: false,
+      inStockOnly: true,
       includeComingSoon: false,
       notify: true,
       channels: ['browser'],

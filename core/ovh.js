@@ -19,34 +19,40 @@
 // Datacenter -> location metadata
 // ---------------------------------------------------------------------------
 // Codes observed live in the feed, plus other well-known OVH datacenters.
+// `short` is the column label in the matrix. The raw codes for the newer
+// datacenters (ca-east-tor-a, eu-west-par-a) are several times wider than a
+// column and collided into unreadable overlap, so each carries a compact form.
 export const DATACENTERS = {
-  bhs:            { city: 'Beauharnois',  country: 'CA', countryName: 'Canada',    flag: '🇨🇦', region: 'North America' },
-  'ca-east-tor-a':{ city: 'Toronto',      country: 'CA', countryName: 'Canada',    flag: '🇨🇦', region: 'North America' },
-  vin:            { city: 'Vint Hill',    country: 'US', countryName: 'USA',       flag: '🇺🇸', region: 'North America' },
-  hil:            { city: 'Hillsboro',    country: 'US', countryName: 'USA',       flag: '🇺🇸', region: 'North America' },
-  gra:            { city: 'Gravelines',   country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  rbx:            { city: 'Roubaix',      country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  sbg:            { city: 'Strasbourg',   country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  'eu-west-par-a':{ city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  'eu-west-par-b':{ city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  'eu-west-par-c':{ city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
-  fra:            { city: 'Frankfurt',    country: 'DE', countryName: 'Germany',   flag: '🇩🇪', region: 'Europe' },
-  lon:            { city: 'London',       country: 'GB', countryName: 'UK',        flag: '🇬🇧', region: 'Europe' },
-  eri:            { city: 'Erith',        country: 'GB', countryName: 'UK',        flag: '🇬🇧', region: 'Europe' },
-  waw:            { city: 'Warsaw',       country: 'PL', countryName: 'Poland',    flag: '🇵🇱', region: 'Europe' },
-  sgp:            { city: 'Singapore',    country: 'SG', countryName: 'Singapore', flag: '🇸🇬', region: 'Asia-Pacific' },
-  syd:            { city: 'Sydney',       country: 'AU', countryName: 'Australia', flag: '🇦🇺', region: 'Asia-Pacific' },
+  bhs:            { short: 'bhs',   city: 'Beauharnois',  country: 'CA', countryName: 'Canada',    flag: '🇨🇦', region: 'North America' },
+  'ca-east-tor-a':{ short: 'tor',   city: 'Toronto',      country: 'CA', countryName: 'Canada',    flag: '🇨🇦', region: 'North America' },
+  vin:            { short: 'vin',   city: 'Vint Hill',    country: 'US', countryName: 'USA',       flag: '🇺🇸', region: 'North America' },
+  hil:            { short: 'hil',   city: 'Hillsboro',    country: 'US', countryName: 'USA',       flag: '🇺🇸', region: 'North America' },
+  gra:            { short: 'gra',   city: 'Gravelines',   country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  rbx:            { short: 'rbx',   city: 'Roubaix',      country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  sbg:            { short: 'sbg',   city: 'Strasbourg',   country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  'eu-west-par-a':{ short: 'par·a', city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  'eu-west-par-b':{ short: 'par·b', city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  'eu-west-par-c':{ short: 'par·c', city: 'Paris',        country: 'FR', countryName: 'France',    flag: '🇫🇷', region: 'Europe' },
+  fra:            { short: 'fra',   city: 'Frankfurt',    country: 'DE', countryName: 'Germany',   flag: '🇩🇪', region: 'Europe' },
+  lon:            { short: 'lon',   city: 'London',       country: 'GB', countryName: 'UK',        flag: '🇬🇧', region: 'Europe' },
+  eri:            { short: 'eri',   city: 'Erith',        country: 'GB', countryName: 'UK',        flag: '🇬🇧', region: 'Europe' },
+  waw:            { short: 'waw',   city: 'Warsaw',       country: 'PL', countryName: 'Poland',    flag: '🇵🇱', region: 'Europe' },
+  sgp:            { short: 'sgp',   city: 'Singapore',    country: 'SG', countryName: 'Singapore', flag: '🇸🇬', region: 'Asia-Pacific' },
+  syd:            { short: 'syd',   city: 'Sydney',       country: 'AU', countryName: 'Australia', flag: '🇦🇺', region: 'Asia-Pacific' },
   // The feed reports Mumbai as `ynm`, not `mum`. Evidence: every one of the
   // 1,775 configurations offered there carries a `-mum` plan-code suffix
   // (e.g. 24rise01-v1-mum). Before this mapping existed they all fell through
   // to country '??' and were excluded by every country filter — invisible.
-  ynm:            { city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
-  mum:            { city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
+  ynm:            { short: 'ynm',   city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
+  mum:            { short: 'mum',   city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
 };
 
 export function dcInfo(code) {
   return (
     DATACENTERS[code] || {
+      // An unrecognised code still gets a usable column: trim it to something
+      // that fits rather than letting it overflow the grid.
+      short: String(code).slice(0, 5),
       city: code,
       country: '??',
       countryName: 'Other',
