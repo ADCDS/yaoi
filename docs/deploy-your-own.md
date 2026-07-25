@@ -162,8 +162,10 @@ jobs:
 
       - name: Save state
         run: |
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # --global matters: the commit happens in a new repository created by
+          # `git init` below, which does not inherit repository-local config.
+          git config --global user.name  'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           rm -rf .state && mkdir .state && cp data/* .state/ 2>/dev/null || true
           cd .state && git init -q -b notify-state && git add -A
           git commit -q -m "state at $(date -u +%FT%TZ)"

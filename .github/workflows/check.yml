@@ -104,8 +104,12 @@ jobs:
 
       - name: Save state
         run: |
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # --global, not repository-local: the commit below happens inside a
+          # brand new repository created by `git init` in .state, which does not
+          # inherit the checkout's local config and would fail with
+          # "empty ident name".
+          git config --global user.name  'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           rm -rf .state && mkdir .state
           cp data/previous.json .state/previous.json
           [ -f data/events.jsonl ] && cp data/events.jsonl .state/events.jsonl || true
