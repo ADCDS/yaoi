@@ -6,7 +6,7 @@
 // and writing the one file that tells it which mode it is running in.
 //
 // Import paths are RELATIVE (`./core/ovh.js`) on purpose: Pages serves a project
-// site from a subpath like /kimsufi-watch/, where an absolute /core/ would 404.
+// site from a subpath like /yaoi-ovh-inspector/, where an absolute /core/ would 404.
 //
 // Usage: node bin/build-static.js --out dist
 
@@ -40,7 +40,7 @@ async function main() {
   }
 
   await writeFile(path.join(outDir, 'config.js'),
-    `window.__KW = ${JSON.stringify({
+    `window.__YAOI = ${JSON.stringify({
       mode: 'static',
       snapshot: './snapshot.json',
       snapshotFull: './snapshot-full.json',

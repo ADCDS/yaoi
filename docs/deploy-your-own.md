@@ -21,9 +21,9 @@ Fork this repository, then in **Settings → General** make it private, or creat
 a private repository and push a copy:
 
 ```bash
-git clone https://github.com/ADCDS/kimsufi-watch.git
-cd kimsufi-watch
-gh repo create my-kimsufi-watch --private --source=. --push
+git clone https://github.com/ADCDS/yaoi-ovh-inspector.git
+cd yaoi-ovh-inspector
+gh repo create my-yaoi --private --source=. --push
 ```
 
 Private matters: your watches go in a secret, but a private repository means the
@@ -85,7 +85,7 @@ nobody else would guess.
 
 | secret | value |
 |---|---|
-| `NTFY_TOPIC` | `kimsufi-a7f3c1` |
+| `NTFY_TOPIC` | `yaoi-a7f3c1` |
 | `NTFY_URL` | *(optional)* `https://ntfy.example.com` for a self-hosted server |
 | `NTFY_TOKEN` | *(optional)* bearer token for a protected topic |
 
@@ -99,7 +99,7 @@ webhook and set `WEBHOOK_URL`; the payload shape is chosen from the host.
 | `SMTP_HOST` | `smtp.example.com` |
 | `SMTP_PORT` | `587` (STARTTLS) or `465` (implicit TLS) |
 | `SMTP_USER` / `SMTP_PASS` | your credentials |
-| `SMTP_FROM` | `Kimsufi Watch <alerts@example.com>` |
+| `SMTP_FROM` | `YAOI <alerts@example.com>` |
 | `SMTP_TO` | where to send; comma-separated for several |
 
 Gmail needs an [app password](https://support.google.com/accounts/answer/185833),
@@ -144,7 +144,7 @@ jobs:
           fi
 
       - name: Check and notify
-        run: node bin/check.js --out /tmp/kw-out
+        run: node bin/check.js --out /tmp/yaoi-out
         env:
           WATCHES_JSON:       ${{ secrets.WATCHES_JSON }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

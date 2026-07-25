@@ -19,15 +19,15 @@
 import { normalizeWatch, defaultWatches, runWatches, MAX_WATCHES } from './core/watches.js';
 import { AlertState, reseed } from './core/state.js';
 
-const MODE = (window.__KW && window.__KW.mode) || 'server';
-const SUBSIDIARY = (window.__KW && window.__KW.subsidiary) || 'CA';
-const SNAPSHOT = (window.__KW && window.__KW.snapshot) || './snapshot.json';
-const FULL_SNAPSHOT = (window.__KW && window.__KW.snapshotFull) || './snapshot-full.json';
+const MODE = (window.__YAOI && window.__YAOI.mode) || 'server';
+const SUBSIDIARY = (window.__YAOI && window.__YAOI.subsidiary) || 'CA';
+const SNAPSHOT = (window.__YAOI && window.__YAOI.snapshot) || './snapshot.json';
+const FULL_SNAPSHOT = (window.__YAOI && window.__YAOI.snapshotFull) || './snapshot-full.json';
 
 // A visitor coming back after a while should not be told about every server that
 // appeared while the tab was shut — that is a summary, not thirty alerts.
 const STALE_MS = 30 * 60 * 1000;
-const LS = { watches: 'kw.watches', state: 'kw.alertstate', prefs: 'kw.prefs' };
+const LS = { watches: 'yaoi.watches', state: 'yaoi.alertstate', prefs: 'yaoi.prefs' };
 
 export const mode = MODE;
 export const subsidiary = SUBSIDIARY;

@@ -1,4 +1,4 @@
-# 📡 Kimsufi Watch
+# 📡 YAOI — Yet another OVH Inspector
 
 Live availability for **OVH Eco** dedicated servers — Kimsufi, Rise, So you
 Start and Advance — read per exact configuration **and per datacenter**.

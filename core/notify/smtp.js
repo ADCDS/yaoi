@@ -87,7 +87,7 @@ function encodeHeader(value) {
 }
 
 function buildMessage({ from, to, subject, text, html }) {
-  const boundary = `kw-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+  const boundary = `yaoi-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
   const headers = [
     `From: ${from}`,
     `To: ${Array.isArray(to) ? to.join(', ') : to}`,
@@ -134,13 +134,13 @@ export async function sendMail(cfg, { subject, text, html }) {
   socket.setTimeout(timeoutMs);
   try {
     expect(await readReply(socket, timeoutMs), 220);
-    let ehlo = expect(await send(socket, `EHLO ${cfg.clientName || 'kimsufi-watch'}`, timeoutMs), 250);
+    let ehlo = expect(await send(socket, `EHLO ${cfg.clientName || 'yaoi'}`, timeoutMs), 250);
 
     if (!secure && /\bSTARTTLS\b/i.test(ehlo.text)) {
       expect(await send(socket, 'STARTTLS', timeoutMs), 220);
       socket = await upgrade(socket, host);
       socket.setTimeout(timeoutMs);
-      ehlo = expect(await send(socket, `EHLO ${cfg.clientName || 'kimsufi-watch'}`, timeoutMs), 250);
+      ehlo = expect(await send(socket, `EHLO ${cfg.clientName || 'yaoi'}`, timeoutMs), 250);
     }
 
     if (cfg.user) {

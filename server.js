@@ -1,4 +1,4 @@
-// server.js — Kimsufi Watch, long-lived server mode.
+// server.js — YAOI, long-lived server mode.
 //
 // This is the local/development and optional self-host mode: a resident process
 // that polls every 60s and pushes live updates over SSE, with watches stored
@@ -310,7 +310,7 @@ function parseCookies(header = '') {
   return out;
 }
 function providedToken(req, url) {
-  const cookie = parseCookies(req.headers.cookie || '').kw_token;
+  const cookie = parseCookies(req.headers.cookie || '').yaoi_token;
   const auth = req.headers.authorization || '';
   const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   return url.searchParams.get('token') || req.headers['x-auth-token'] || bearer || cookie || '';
@@ -338,7 +338,7 @@ const server = http.createServer(async (req, res) => {
       if (url.searchParams.get('token')) {
         const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
         const secure = proto === 'https' ? '; Secure' : '';
-        const cookie = `kw_token=${encodeURIComponent(AUTH_TOKEN)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${secure}`;
+        const cookie = `yaoi_token=${encodeURIComponent(AUTH_TOKEN)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${secure}`;
         if (req.method === 'GET' && (req.headers.accept || '').includes('text/html')) {
           url.searchParams.delete('token');
           res.writeHead(302, { 'Set-Cookie': cookie, Location: url.pathname + (url.search || '') });
@@ -473,7 +473,7 @@ const server = http.createServer(async (req, res) => {
     // shipping it from both sides means the client never has to guess (probing
     // would misfire on GitHub Pages, whose 404 is an HTML page).
     if (pathname === '/config.js') {
-      const body = `window.__KW = ${JSON.stringify({ mode: 'server', apiBase: '', subsidiary: SUBSIDIARY })};\n`;
+      const body = `window.__YAOI = ${JSON.stringify({ mode: 'server', apiBase: '', subsidiary: SUBSIDIARY })};\n`;
       res.writeHead(200, { 'content-type': MIME['.js'], 'cache-control': 'no-cache' });
       res.end(body);
       return;
@@ -514,7 +514,7 @@ async function main() {
   events = closeDurations(await loadEvents(EVENTS_FILE));
 
   server.listen(PORT, HOST, () => {
-    log(`Kimsufi Watch on http://${HOST}:${PORT}  (polling every ${POLL_MS / 1000}s)`);
+    log(`YAOI on http://${HOST}:${PORT}  (polling every ${POLL_MS / 1000}s)`);
     log(`bind: ${HOST} · auth: ${AUTH_TOKEN ? 'token required' : 'none (loopback/proxy)'} · max SSE: ${MAX_SSE}`);
     log(`watches: ${watches.length} from ${loaded.source} · history: ${events.length} events`);
     const on = channelStatus().filter((c) => c.configured && c.channel !== 'browser').map((c) => c.channel);

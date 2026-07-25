@@ -1,4 +1,4 @@
-// public/app.js — Kimsufi Watch client.
+// public/app.js — YAOI client.
 //
 // The structural idea: ONE ROW PER CONFIGURATION, datacenters as columns.
 //
