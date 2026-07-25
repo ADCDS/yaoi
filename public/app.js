@@ -107,6 +107,13 @@ function buildRows() {
     if (filters.tiers.size && !anyTier) continue;
     if (cells.every((x) => x.tier === 'notSold')) continue;
 
+    // By default show only what you could actually buy somewhere. Of the 4,165
+    // eco configurations, 2,653 have no stock in any datacenter at all, and
+    // listing them by default buries the ones you can have. Click the
+    // "out of stock" rung on the ladder to bring them back.
+    const buyable = cells.some((x) => x.tier === 'now' || x.tier === 'h24' || x.tier === 'h72' || x.tier === 'long');
+    if (!buyable && !filters.tiers.size) continue;
+
     if (Object.values(c.dc).some((v) => availMeta(v).orderable)) orderable++;
     // How many of the visible datacenters can actually sell this. Used to break
     // ties on the availability sort, so a configuration you can get in six places
