@@ -1,5 +1,13 @@
 # 📡 YAOI — Yet another OVH Inspector
 
+**→ [Live dashboard](https://adcds.github.io/yaoi/)** · no account, no install,
+nothing to configure. Your watches stay in your own browser.
+
+[![Tests](https://github.com/ADCDS/yaoi/actions/workflows/ci.yml/badge.svg)](https://github.com/ADCDS/yaoi/actions/workflows/ci.yml)
+[![Publish snapshot](https://github.com/ADCDS/yaoi/actions/workflows/check.yml/badge.svg)](https://github.com/ADCDS/yaoi/actions/workflows/check.yml)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-55e0a0)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-8c7cf0)](LICENSE)
+
 Live availability for **OVH Eco** dedicated servers — Kimsufi, Rise, So you
 Start and Advance — read per exact configuration **and per datacenter**.
 
