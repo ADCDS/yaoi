@@ -6,7 +6,7 @@
 // and writing the one file that tells it which mode it is running in.
 //
 // Import paths are RELATIVE (`./core/ovh.js`) on purpose: Pages serves a project
-// site from a subpath like /yaoi-ovh-inspector/, where an absolute /core/ would 404.
+// site from a subpath like /yaoi/, where an absolute /core/ would 404.
 //
 // Usage: node bin/build-static.js --out dist
 

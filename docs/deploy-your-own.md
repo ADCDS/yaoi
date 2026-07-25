@@ -21,8 +21,8 @@ Fork this repository, then in **Settings → General** make it private, or creat
 a private repository and push a copy:
 
 ```bash
-git clone https://github.com/ADCDS/yaoi-ovh-inspector.git
-cd yaoi-ovh-inspector
+git clone https://github.com/ADCDS/yaoi.git
+cd yaoi
 gh repo create my-yaoi --private --source=. --push
 ```
 

@@ -90,7 +90,11 @@ jobs:
           ls -la dist
           echo "snapshot.json: $(gzip -c dist/snapshot.json | wc -c) bytes gzipped"
 
+      # enablement turns Pages on for the repository if it is not already, so the
+      # very first run deploys instead of failing on a site that does not exist.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
