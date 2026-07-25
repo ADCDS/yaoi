@@ -1,0 +1,18 @@
+# Runtime state — never committed.
+# Watches and the event log are personal: on a public repo they would publish
+# which servers you are hunting. Real watches come from WATCHES_FILE (local) or
+# the WATCHES_JSON secret (Actions); config/watches.example.json is the template.
+data/
+
+node_modules/
+*.log
+
+# Local env for notification channel secrets (Telegram token, SMTP password, …)
+.env
+.env.*
+!.env.example
+
+# Build output for the static (GitHub Pages) bundle
+dist/
+
+.DS_Store

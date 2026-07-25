@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kimsufi Watch — OVH Eco live availability</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📡%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📡</span>
+      <div>
+        <h1>Kimsufi&nbsp;Watch</h1>
+        <span class="sub">OVH Eco · per-config availability</span>
+      </div>
+    </div>
+    <div class="status" id="status"><span class="pill muted">connecting…</span></div>
+    <div class="actions">
+      <button id="btn-notify" class="btn">🔔 Enable alerts</button>
+      <button id="btn-mute" class="btn ghost" title="Toggle sound">🔊</button>
+      <button id="btn-refresh" class="btn ghost" title="Force a fresh poll">↻</button>
+      <button id="btn-test" class="btn ghost" title="Fire a test notification">Test</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="targets">
+      <div class="section-head">
+        <h2>Notification targets</h2>
+        <button id="btn-add-target" class="btn small accent">+ New target</button>
+      </div>
+      <div class="target-grid" id="target-grid"></div>
+    </section>
+
+    <section class="board">
+      <div class="filters" id="filters">
+        <input type="search" id="f-search" class="search" placeholder="Search plan, spec, fqn…" autocomplete="off" />
+        <div class="chip-group" id="f-countries" data-label="Country"></div>
+        <div class="chip-group" id="f-kinds" data-label="Storage"></div>
+        <div class="chip-group" id="f-ranges" data-label="Range"></div>
+        <label class="inline">RAM ≥
+          <select id="f-ram">
+            <option value="0">any</option>
+            <option value="16">16 GB</option>
+            <option value="32">32 GB</option>
+            <option value="64">64 GB</option>
+            <option value="128">128 GB</option>
+            <option value="256">256 GB</option>
+          </select>
+        </label>
+        <label class="inline">Show
+          <select id="f-avail">
+            <option value="instock">In stock now</option>
+            <option value="orderable" selected>Orderable</option>
+            <option value="all">Everything</option>
+          </select>
+        </label>
+        <button id="f-reset" class="btn ghost small">reset</button>
+      </div>
+
+      <div class="results-head">
+        <span id="results-count" class="muted">loading…</span>
+        <div class="legend">
+          <span class="lg in-stock">in stock</span>
+          <span class="lg delayed">delayed</span>
+          <span class="lg coming">coming soon</span>
+          <span class="lg unavail">unavailable</span>
+          <span class="lg target-dot">★ target match</span>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th data-sort="range">Range</th>
+              <th data-sort="name">Server</th>
+              <th data-sort="ram" class="num">RAM</th>
+              <th data-sort="storage">Storage</th>
+              <th data-sort="price" class="num">Price</th>
+              <th data-sort="dc">Location</th>
+              <th data-sort="avail">Availability</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="grid-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+
+  <!-- Target editor -->
+  <div class="modal-backdrop" id="modal" hidden>
+    <form class="modal" id="target-form" autocomplete="off">
+      <h3 id="modal-title">New target</h3>
+      <label class="field">Name
+        <input type="text" name="name" required maxlength="120" placeholder="e.g. Canada NVMe in stock" />
+      </label>
+
+      <div class="field">Country <small>(none = any)</small>
+        <div class="chip-group editor" id="e-countries"></div>
+      </div>
+      <div class="field">Storage type
+        <div class="chip-group editor" id="e-kinds"></div>
+      </div>
+      <div class="field">Range
+        <div class="chip-group editor" id="e-ranges"></div>
+      </div>
+
+      <div class="row2">
+        <label class="field">Min RAM (GB)
+          <input type="number" name="minRamGB" min="0" step="8" placeholder="any" />
+        </label>
+        <label class="field">Storage contains
+          <input type="text" name="storageContains" placeholder="e.g. nvme, 1920, 2x" />
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="field">Plan codes <small>(comma-separated)</small>
+          <input type="text" name="planCodes" placeholder="e.g. 24sk202, 26sk50a-v1" />
+        </label>
+        <label class="field">Free-text match
+          <input type="text" name="search" placeholder="matches name / spec / fqn" />
+        </label>
+        <div class="field">Datacenters <small>(overrides country)</small>
+          <div class="chip-group editor" id="e-dcs"></div>
+        </div>
+      </details>
+
+      <div class="checks">
+        <label><input type="checkbox" name="inStockOnly" /> In-stock only (≤1h)</label>
+        <label><input type="checkbox" name="includeComingSoon" /> Include “coming soon”</label>
+        <label><input type="checkbox" name="notify" checked /> Desktop alerts</label>
+        <label><input type="checkbox" name="enabled" checked /> Enabled</label>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn ghost danger" id="btn-delete-target" hidden>Delete</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn ghost" id="btn-cancel">Cancel</button>
+        <button type="submit" class="btn accent">Save target</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

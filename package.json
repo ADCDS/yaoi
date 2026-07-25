@@ -1,0 +1,13 @@
+{
+  "name": "kimsufi-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live OVH Eco (Kimsufi / Rise / So you Start / Advance / Scale) per-configuration availability monitor with notification targets.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
