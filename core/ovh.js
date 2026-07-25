@@ -1,4 +1,4 @@
-// lib/ovh.js
+// core/ovh.js
 // Normalisation helpers for the OVH "Eco" (Kimsufi / Rise / So you Start / …)
 // dedicated-server availability feed.
 //
@@ -9,6 +9,11 @@
 // granularity is the whole point: the marketing catalogue may advertise a
 // config that the order page won't actually sell in a given country — here we
 // read the order-level truth directly.
+//
+// ISOMORPHIC: this module must stay importable by both Node and the browser.
+// No `node:` imports, no filesystem, no globals beyond fetch-free pure code.
+// The browser imports it to match watches client-side; a second copy of this
+// logic living in public/app.js is exactly the drift we are avoiding.
 
 // ---------------------------------------------------------------------------
 // Datacenter -> location metadata
@@ -31,6 +36,11 @@ export const DATACENTERS = {
   waw:            { city: 'Warsaw',       country: 'PL', countryName: 'Poland',    flag: '🇵🇱', region: 'Europe' },
   sgp:            { city: 'Singapore',    country: 'SG', countryName: 'Singapore', flag: '🇸🇬', region: 'Asia-Pacific' },
   syd:            { city: 'Sydney',       country: 'AU', countryName: 'Australia', flag: '🇦🇺', region: 'Asia-Pacific' },
+  // The feed reports Mumbai as `ynm`, not `mum`. Evidence: every one of the
+  // 1,775 configurations offered there carries a `-mum` plan-code suffix
+  // (e.g. 24rise01-v1-mum). Before this mapping existed they all fell through
+  // to country '??' and were excluded by every country filter — invisible.
+  ynm:            { city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
   mum:            { city: 'Mumbai',       country: 'IN', countryName: 'India',     flag: '🇮🇳', region: 'Asia-Pacific' },
 };
 
@@ -50,20 +60,29 @@ export function dcInfo(code) {
 // Commercial range, inferred from the planCode (catalogue-independent).
 // ---------------------------------------------------------------------------
 const RANGE_META = {
-  kimsufi:    { label: 'Kimsufi',      color: '#2dd4bf' },
-  soyoustart: { label: 'So you Start', color: '#c084fc' },
-  rise:       { label: 'Rise',         color: '#60a5fa' },
-  advance:    { label: 'Advance',      color: '#818cf8' },
-  scale:      { label: 'Scale',        color: '#94a3b8' },
-  hgr:        { label: 'High Grade',   color: '#f472b6' },
-  hci:        { label: 'HCI',          color: '#fb923c' },
-  sds:        { label: 'SDS',          color: '#fbbf24' },
-  game:       { label: 'Game',         color: '#34d399' },
-  other:      { label: 'Other',        color: '#64748b' },
+  kimsufi:    { label: 'Kimsufi',      eco: true },
+  soyoustart: { label: 'So you Start', eco: true },
+  rise:       { label: 'Rise',         eco: true },
+  advance:    { label: 'Advance',      eco: true },
+  scale:      { label: 'Scale',        eco: false },
+  hgr:        { label: 'High Grade',   eco: false },
+  hci:        { label: 'HCI',          eco: false },
+  sds:        { label: 'SDS',          eco: false },
+  other:      { label: 'Other',        eco: false },
 };
 
 export function rangeMeta(range) {
   return RANGE_META[range] || RANGE_META.other;
+}
+
+// Ranges OVH actually sells through the public "eco" catalogue — the only ones
+// with an obtainable price and a real order page. Everything else is shown only
+// when the user asks for it, and labelled as having no public price.
+export const ECO_RANGES = Object.freeze(
+  Object.keys(RANGE_META).filter((r) => RANGE_META[r].eco),
+);
+export function isEco(range) {
+  return !!rangeMeta(range).eco;
 }
 
 export function classifyRange(planCode) {
@@ -85,14 +104,31 @@ export function classifyRange(planCode) {
 // ---------------------------------------------------------------------------
 // Spec parsers (memory / storage codes -> human labels)
 // ---------------------------------------------------------------------------
+// Memory codes seen live, all five shapes:
+//   ram-32g-ecc-2133          ram-96g-ddr5-ecc-4800
+//   ram-64g-on-die-ecc-5600   ram-32g-ddr5-on-die-ecc-4800
+//   ram-32g-noecc-2133
+// The previous parser only understood `ram-Ng-(ecc|noecc)-N`, so the ~2,500
+// ddr*/on-die-ecc configurations silently reported ECC as absent. Capacity was
+// always right, which is why filtering worked and the bug stayed hidden.
 export function parseMemory(code) {
-  const m = /ram-(\d+)g(?:-(ecc|noecc))?(?:-(\d+))?/.exec(String(code || ''));
-  if (!m) return { ramGB: 0, label: code || '—', ecc: false };
-  const ramGB = Number(m[1]);
-  const ecc = m[2] === 'ecc';
-  const speed = m[3] ? Number(m[3]) : null;
-  const label = `${ramGB} GB${ecc ? ' ECC' : ''}${speed ? ` ${speed}` : ''}`;
-  return { ramGB, label, ecc, speed };
+  const raw = String(code || '');
+  const cap = /ram-(\d+)g/.exec(raw);
+  if (!cap) return { ramGB: 0, label: raw || '—', ecc: false, speed: null, ddr: null };
+  const ramGB = Number(cap[1]);
+  const noecc = /\bnoecc\b/.test(raw);
+  const ecc = !noecc && /\becc\b/.test(raw);
+  const onDie = /on-die-ecc/.test(raw);
+  const ddrM = /ddr(\d)/.exec(raw);
+  const ddr = ddrM ? Number(ddrM[1]) : null;
+  const speedM = /-(\d{3,5})$/.exec(raw);
+  const speed = speedM ? Number(speedM[1]) : null;
+
+  let label = `${ramGB} GB`;
+  if (ddr) label += ` DDR${ddr}`;
+  if (ecc) label += onDie ? ' ECC' : ' ECC';
+  if (speed) label += ` ${speed}`;
+  return { ramGB, label, ecc, onDie, ddr, speed };
 }
 
 const MEDIA = {
@@ -100,9 +136,12 @@ const MEDIA = {
   ssd: 'SSD',
   sas: 'SAS',
   sa: 'SATA',
+  hdd: 'HDD',
 };
 // best (most desirable) media wins for the primary "kind"
-const MEDIA_RANK = { NVMe: 0, SSD: 1, SAS: 2, SATA: 3 };
+const MEDIA_RANK = { NVMe: 0, SSD: 1, SAS: 2, SATA: 3, HDD: 4 };
+
+export const STORAGE_KINDS = Object.freeze(['NVMe', 'SSD', 'SAS', 'SATA', 'HDD']);
 
 function fmtSize(gb) {
   if (gb >= 1000) {
@@ -111,6 +150,19 @@ function fmtSize(gb) {
   }
   return `${gb} GB`;
 }
+
+// Storage codes come in two spellings for the media, and the old regex
+// `(\d+)x(\d+)(nvme|ssd|sas|sa)\b` only understood the first:
+//
+//   media glued on      softraid-2x450nvme            ✓ parsed before
+//   media after a dash  hardraid-24x22000-hdd-sas     ✗ missed entirely
+//
+// The second form mattered more than it looked. On mixed layouts such as
+// `hardraid-24x22000-hdd-sas-2x960nvme` the old regex matched *only* the NVMe
+// group, so a 24×22 TB storage server rendered as a 2×960 GB NVMe box — wrong
+// data rather than absent data. `-?` plus an optional trailing bus token
+// handles both spellings in one pass.
+const DRIVE_RE = /(\d+)x(\d+)-?(hdd|nvme|ssd|sas|sa)(?:-(sas|sata|sa))?\b/g;
 
 export function parseStorage(code) {
   const raw = String(code || '');
@@ -123,25 +175,19 @@ export function parseStorage(code) {
 
   const drives = [];
   const kinds = new Set();
-  const re = /(\d+)x(\d+)(nvme|ssd|sas|sa)\b/g;
+  DRIVE_RE.lastIndex = 0;
   let mm;
-  while ((mm = re.exec(lc)) !== null) {
+  while ((mm = DRIVE_RE.exec(lc)) !== null) {
     const count = Number(mm[1]);
     const size = Number(mm[2]);
     const media = MEDIA[mm[3]] || mm[3].toUpperCase();
-    drives.push({ count, size, media });
+    const bus = mm[4] ? (MEDIA[mm[4]] || mm[4].toUpperCase()) : null;
+    drives.push({ count, size, media, bus });
     kinds.add(media);
   }
   if (drives.length === 0) {
-    // e.g. "noraid-0" (diskless) or unknown layout
-    return {
-      label: raw || '—',
-      kind: '—',
-      kinds: [],
-      raid,
-      drives: [],
-      totalGB: 0,
-    };
+    // e.g. "noraid-0" (diskless) or an unknown layout
+    return { label: raw || '—', kind: '—', kinds: [], raid, drives: [], totalGB: 0 };
   }
   const kindList = [...kinds].sort((a, b) => (MEDIA_RANK[a] ?? 9) - (MEDIA_RANK[b] ?? 9));
   const primary = kindList[0];
@@ -181,6 +227,70 @@ export function availMeta(value) {
 }
 
 // ---------------------------------------------------------------------------
+// The delivery ladder
+// ---------------------------------------------------------------------------
+// Availability is not a boolean: it is a position on an ordered time-to-delivery
+// scale. These tiers are the rungs. `notSold` is deliberately separate from
+// `none`: a datacenter absent from a configuration's map is not selling that
+// configuration at all, which is a different fact from being out of stock.
+export const TIERS = Object.freeze([
+  { key: 'now',     label: 'in stock',    sub: 'ready in ≤1h',      max: 1 },
+  { key: 'h24',     label: '24 hours',    sub: 'next-day build',    max: 24 },
+  { key: 'h72',     label: '72 hours',    sub: 'three-day wait',    max: 72 },
+  { key: 'long',    label: 'long wait',   sub: '10 days or more',   max: Infinity },
+  { key: 'soon',    label: 'coming soon', sub: 'not orderable yet', max: null },
+  { key: 'none',    label: 'out of stock',sub: 'nothing to buy',    max: null },
+  { key: 'notSold', label: 'not sold',    sub: 'not offered here',  max: null },
+]);
+
+export function tierOf(value) {
+  if (value === undefined || value === null) return 'notSold';
+  const am = availMeta(value);
+  if (am.state === 'comingSoon') return 'soon';
+  if (!am.orderable) return 'none';
+  if (am.hours === undefined) return 'none';
+  if (am.hours <= 1) return 'now';
+  if (am.hours <= 24) return 'h24';
+  if (am.hours <= 72) return 'h72';
+  return 'long';
+}
+
+/**
+ * The datacenter columns for the matrix, grouped by country.
+ *
+ * Built from live data only: the static map lists datacenters (vin, hil, eri)
+ * that currently have no rows at all, and offering them as filters produced
+ * controls that could only ever return nothing. Order is stable across runs so
+ * the layout does not reshuffle when a datacenter briefly empties out.
+ */
+export function dcColumns(configs) {
+  const live = new Set();
+  for (const c of configs) for (const code in c.dc) live.add(code);
+  const known = Object.keys(DATACENTERS);
+  return [...live]
+    .sort((a, b) => {
+      const ia = dcInfo(a), ib = dcInfo(b);
+      if (ia.country !== ib.country) return ia.country.localeCompare(ib.country);
+      return known.indexOf(a) - known.indexOf(b);
+    })
+    .map((code) => ({ code, ...dcInfo(code) }));
+}
+
+// Count config×datacenter pairs per tier. The UI builds its ladder from this,
+// so rungs with no live data are never rendered — right now nothing sits at
+// 240H or 480H, and a hardcoded ladder would show two dead rungs.
+export function tierCounts(configs) {
+  const counts = {};
+  for (const c of configs) {
+    for (const dc in c.dc) {
+      const t = tierOf(c.dc[dc]);
+      counts[t] = (counts[t] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level: raw feed -> array of normalised config records
 // ---------------------------------------------------------------------------
 export function normalizeAvailabilities(rows, catalogMap = {}) {
@@ -190,8 +300,14 @@ export function normalizeAvailabilities(rows, catalogMap = {}) {
     if (!r || !r.fqn) continue;
     const { range, game, storage } = classifyRange(r.planCode);
     const mem = parseMemory(r.memory);
-    const stor = parseStorage(r.storage);
+    const dataStor = parseStorage(r.storage);
     const sysStor = r.systemStorage ? parseStorage(r.systemStorage) : null;
+    // `noraid-0` means "no data array" — the machine's actual disks are then
+    // reported under systemStorage instead. 920 configurations (151 orderable)
+    // are like this, and reading only `storage` displayed the literal string
+    // "noraid-0" and left them unreachable by every storage-kind filter, even
+    // though their real disks (2×960 GB NVMe, …) were known all along.
+    const stor = dataStor.drives.length ? dataStor : (sysStor?.drives.length ? sysStor : dataStor);
 
     const dc = {};
     let best = Infinity;
@@ -218,10 +334,16 @@ export function normalizeAvailabilities(rows, catalogMap = {}) {
       server: r.server,
       range,
       rangeLabel: rm.label,
-      rangeColor: rm.color,
+      eco: !!rm.eco,
       game,
       storageServer: storage,
       name,
+      // The model designation on its own ("KS-1"), split from the CPU half of
+      // the catalogue name ("KS-1 | Intel Xeon-D 1520"). Both halves are shown
+      // separately in the table, and the model is what the order deep-link
+      // slug is built from.
+      model: splitCatalogName(name).model,
+      cpu: splitCatalogName(name).cpu,
       price,
       priceText: price != null ? formatMoney(price, currency) : null,
       currency,
@@ -230,8 +352,13 @@ export function normalizeAvailabilities(rows, catalogMap = {}) {
       memoryLabel: mem.label,
       storageKind: stor.kind,
       storageKinds: stor.kinds,
-      storageLabel: stor.label,
+      storageLabel: stor.drives.length ? stor.label : 'Diskless',
       storageRaw: r.storage || '',
+      systemStorageRaw: r.systemStorage || '',
+      // True when the disks shown come from systemStorage because the data
+      // array is `noraid-0`. Free-text storage matching searches both codes so
+      // a watch for "nvme" still finds these.
+      storageFromSystem: !dataStor.drives.length && !!sysStor?.drives.length,
       systemStorageLabel: sysStor?.label || null,
       dc,
       bestRank: best,
@@ -240,6 +367,15 @@ export function normalizeAvailabilities(rows, catalogMap = {}) {
     });
   }
   return out;
+}
+
+// Catalogue invoice names look like "KS-1 | Intel Xeon-D 1520". The half before
+// the pipe is the model designation; the half after is the CPU.
+export function splitCatalogName(name) {
+  const s = String(name || '');
+  const i = s.indexOf('|');
+  if (i === -1) return { model: s.trim(), cpu: '' };
+  return { model: s.slice(0, i).trim(), cpu: s.slice(i + 1).trim() };
 }
 
 // Build a planCode -> {name, price, currency} map from an OVH order catalogue.
