@@ -63,6 +63,19 @@ phone with the tab closed, run your own copy —
 [docs/deploy-your-own.md](docs/deploy-your-own.md) walks through it in about five
 minutes.
 
+### Publishing your own dashboard
+
+The `Publish snapshot` workflow deploys to GitHub Pages, but Pages has to be
+turned on once by hand first — the workflow token can deploy to an existing site
+and not create one:
+
+```bash
+gh api -X POST repos/OWNER/REPO/pages -f build_type=workflow
+```
+
+or **Settings → Pages → Source: GitHub Actions**. After that the schedule keeps
+it fresh on its own.
+
 ## Notifications
 
 Four channels, all dependency-free. Configure whichever you want by environment

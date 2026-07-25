@@ -90,11 +90,13 @@ jobs:
           ls -la dist
           echo "snapshot.json: $(gzip -c dist/snapshot.json | wc -c) bytes gzipped"
 
-      # enablement turns Pages on for the repository if it is not already, so the
-      # very first run deploys instead of failing on a site that does not exist.
+      # Pages must already be enabled with "GitHub Actions" as its source. The
+      # workflow token has pages:write, which deploys to an existing site but
+      # cannot create one — `enablement: true` fails with "Resource not
+      # accessible by integration". Enable it once per repository:
+      #   gh api -X POST repos/OWNER/REPO/pages -f build_type=workflow
+      # or Settings -> Pages -> Source: GitHub Actions.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
