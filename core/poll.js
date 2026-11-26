@@ -10,11 +10,25 @@ export const AVAIL_URL_DEFAULT =
   'https://eu.api.ovh.com/1.0/dedicated/server/datacenter/availabilities';
 
 // The availability feed has no per-subsidiary variant; the catalogue does.
-const CATALOG_HOSTS = { CA: 'https://ca.api.ovh.com/1.0', US: 'https://us.api.ovh.com/1.0' };
+//
+// Which cluster serves a subsidiary is not geographic. Probing each subsidiary
+// against each cluster: European subsidiaries answer on eu.api, US on us.api,
+// and CA, AU, SG and IN on ca.api. Sending IN to eu.api is a 400
+// "invalid ovhSubsidiary", which silently drops names and prices (the app keeps
+// working with derived names, so the mistake is easy to miss). Anything not
+// listed here falls back to eu.api below.
+const CATALOG_HOSTS = {
+  CA: 'https://ca.api.ovh.com/1.0',
+  US: 'https://us.api.ovh.com/1.0',
+  AU: 'https://ca.api.ovh.com/1.0',
+  SG: 'https://ca.api.ovh.com/1.0',
+  IN: 'https://ca.api.ovh.com/1.0',
+};
 
 export function catalogUrl(subsidiary = 'CA') {
-  const host = CATALOG_HOSTS[subsidiary] || 'https://eu.api.ovh.com/1.0';
-  return `${host}/order/catalog/public/eco?ovhSubsidiary=${subsidiary}`;
+  const sub = String(subsidiary || 'CA').toUpperCase();
+  const host = CATALOG_HOSTS[sub] || 'https://eu.api.ovh.com/1.0';
+  return `${host}/order/catalog/public/eco?ovhSubsidiary=${sub}`;
 }
 
 /** JSON fetch with a timeout and one retry, to ride out transient blips. */
